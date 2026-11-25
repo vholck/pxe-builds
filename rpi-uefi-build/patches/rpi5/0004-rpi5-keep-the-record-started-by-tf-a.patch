@@ -1,0 +1,76 @@
+diff --git a/Platform/RaspberryPi/RPi5/Include/Rpi5EarlyLog.h b/Platform/RaspberryPi/RPi5/Include/Rpi5EarlyLog.h
+index 5b4c9db..e8a9177 100644
+--- a/Platform/RaspberryPi/RPi5/Include/Rpi5EarlyLog.h
++++ b/Platform/RaspberryPi/RPi5/Include/Rpi5EarlyLog.h
+@@ -26,11 +26,17 @@
+ #define RPI5_EARLY_LOG_BASE   0x00400000
+ #define RPI5_EARLY_LOG_SIZE   0x00010000
+ #define RPI5_EARLY_LOG_MAGIC  SIGNATURE_32 ('R', '5', 'L', 'G')
++//
++// Value of StartedBy while a record started by Trusted Firmware-A has not
++// been taken over by the UEFI firmware yet.
++//
++#define RPI5_EARLY_LOG_STARTED_BY_TFA  SIGNATURE_32 ('T', 'F', 'A', '1')
+ 
+ typedef struct {
+   //
+-  // RPI5_EARLY_LOG_MAGIC while the record is in use. Set by the first module
+-  // of a boot (SEC), cleared at ExitBootServices.
++  // RPI5_EARLY_LOG_MAGIC while the record is in use. Set by whatever runs
++  // first in a boot (Trusted Firmware-A, else SEC), cleared at
++  // ExitBootServices.
+   //
+   UINT32    Magic;
+   //
+@@ -41,7 +47,15 @@ typedef struct {
+   // Number of bytes that did not fit.
+   //
+   UINT32    Dropped;
+-  UINT32    Reserved;
++  //
++  // RPI5_EARLY_LOG_STARTED_BY_TFA when Trusted Firmware-A (BL31), which runs
++  // before the UEFI firmware, has started the record in this boot and put
++  // its own messages into it (struct rpi5_early_log in its rpi5_setup.c has
++  // the same layout). SEC then keeps the record and sets the field to 0;
++  // without the value it starts an empty record, because the content is left
++  // over from an earlier boot.
++  //
++  UINT32    StartedBy;
+   //
+   // 0 while the GPIO serial port is not available: output is recorded.
+   // Otherwise the address of its PL011 registers: output is written there.
+diff --git a/Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLib.c b/Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLib.c
+index 035d278..c75e5ab 100644
+--- a/Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLib.c
++++ b/Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLib.c
+@@ -98,15 +98,24 @@ SerialPortInitialize (
+   RPI5_EARLY_LOG  *Log;
+ 
+   //
+-  // A new boot: start an empty record. RAM keeps its content over a reset,
+-  // so whatever is there, a port address above all, is stale.
++  // A new boot. Trusted Firmware-A, which runs before this firmware, has
++  // normally started the record and put its messages into it: keep those.
++  // Otherwise start an empty record. RAM keeps its content over a reset, so
++  // anything not marked as started in this boot, a port address above all,
++  // is stale.
+   //
+   if (!mEarlyLogStarted) {
+-    Log               = (RPI5_EARLY_LOG *)(UINTN)RPI5_EARLY_LOG_BASE;
++    Log = (RPI5_EARLY_LOG *)(UINTN)RPI5_EARLY_LOG_BASE;
++    if ((Log->Magic != RPI5_EARLY_LOG_MAGIC) ||
++        (Log->StartedBy != RPI5_EARLY_LOG_STARTED_BY_TFA) ||
++        (Log->Used > RPI5_EARLY_LOG_CAPACITY))
++    {
++      Log->Used    = 0;
++      Log->Dropped = 0;
++    }
++
+     Log->GpioUartBase = 0;
+-    Log->Used         = 0;
+-    Log->Dropped      = 0;
+-    Log->Reserved     = 0;
++    Log->StartedBy    = 0;
+     Log->Magic        = RPI5_EARLY_LOG_MAGIC;
+     mEarlyLogStarted  = TRUE;
+   }

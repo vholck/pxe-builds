@@ -1,0 +1,42 @@
+#!ipxe
+# Embedded into every iPXE binary built by this stack (see build-ipxe.sh).
+# @IPXE_PRODUCT_NAME@, @IPXE_NET_CONFIG@ and @IPXE_ON_FAILURE@ are filled in at
+# build time.
+#
+# A failing line aborts an iPXE script unless it ends in "||".
+
+# Identify as this stack's iPXE on the DHCP re-probe, so dnsmasq answers with the
+# chain target instead of handing out the iPXE binary again.
+set user-class @IPXE_PRODUCT_NAME@
+# IPXE_IPV6=0 (default): "ifconf --configurator dhcp", IPv4 only. IPXE_IPV6=1:
+# "dhcp", which also waits for an IPv6 router; on a LAN without one that wait
+# runs to its timeout, about 4 s on every boot.
+@IPXE_NET_CONFIG@ || @IPXE_ON_FAILURE@
+
+# Boot server and boot file come from the ProxyDHCP answer when there is one
+# (this stack's dnsmasq), otherwise from the DHCP server itself, so the binaries
+# also work on a network where one DHCP server does both jobs.
+# Unscoped ${next-server} is the main DHCP server's (often the router, also when
+# it is no boot server). Chained scripts that fetch from tftp://${next-server}/
+# must reach the ProxyDHCP server instead.
+isset ${proxydhcp/next-server} && set next-server ${proxydhcp/next-server} ||
+isset ${proxydhcp/filename} && set chain_target ${proxydhcp/filename} || set chain_target ${filename} ||
+
+# HTTPS certificate validation needs a sane clock, and a Pi has no clock of its
+# own: without an answer every https:// chain fails with "Permission denied" and
+# the client ends in IPXE_ON_FAILURE. One server that does not answer (iPXE waits
+# about 15 s, then prints "Could not get time and date") must not cost the boot,
+# so several are tried. Still best effort: with no answer at all the boot goes on.
+ntp pool.ntp.org || ntp time.cloudflare.com || ntp time.google.com ||
+
+# ipxe/boot.ipxe (served by this stack's TFTP server) picks a per-device script or the
+# stack default. If it is missing or fails, chain the default target directly.
+isset ${next-server} && chain tftp://${next-server}/ipxe/boot.ipxe && exit ||
+
+# boot.ipxe sets ${chain_ended} when the chain target ended by itself without
+# booting anything (netboot.xyz: "Boot from local hdd"). iPXE then exits with a
+# failure status: UEFI firmware takes that as "try the next boot option", while
+# status 0 makes it open its setup menu and wait there (seen on the Pi 3 UEFI).
+isset ${chain_ended} && exit 1 ||
+
+chain --autofree ${chain_target} || @IPXE_ON_FAILURE@

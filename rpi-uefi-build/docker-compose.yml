@@ -1,0 +1,61 @@
+# Builds the Raspberry Pi UEFI firmware (EDK2) for Pi 3, Pi 4 and/or Pi 5 and
+# downloads the Raspberry Pi boot files that go with it.
+#
+# The pxe stack normally gets this from the image CI builds
+# (.github/workflows/build-rpi-uefi.yml); there, a Pi is switched to UEFI by
+# listing its serial in RPI5_UEFI_SERIALS / RPI4_UEFI_SERIALS / RPI3_UEFI_SERIALS.
+# Use this stack for local or debug builds.
+#
+# Output in OUT_DIR:
+#   generic-<model>/   complete boot tree for that model
+#   tftp/<serial>/     only when SERIAL is set: copy for one Pi; put it in the TFTP root
+#
+# Usage:
+#   docker compose --env-file ../build.env run --rm rpi-uefi-build                       # all models
+#   MODEL=rpi4 SERIAL=1234abcd docker compose --env-file ../build.env run --rm rpi-uefi-build
+#
+# Build settings come from ../build.env (the file CI builds with). Local only:
+# MODEL, SERIAL, FORCE_UEFI_REBUILD=1, OUT_DIR (default ./out), PUID/PGID.
+
+x-paths:
+  out_dir: &out_dir ${OUT_DIR:-./out}
+
+services:
+  rpi-uefi-build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PFTF_REF: ${PFTF_REF:-3db317e8428bc43211ba5dbc0cad01143a565ef7}
+        RPI5_UEFI_REF: ${RPI5_UEFI_REF:-ad501cf3aeb7060b1ce0324b9d8972a4daf19b38}
+        RPI5_TFA_TAG: ${RPI5_TFA_TAG-lts-v2.14.15}
+        RPI5_TFA_COMMIT: ${RPI5_TFA_COMMIT:-28b7463297f5563318b3656f0a003e82183510a2}
+        UEFI_IPXE_REF: ${UEFI_IPXE_REF:-b847e5f0734f6130c6ee1a4cacdcff508e7aaa3e}
+        # device tree sources (../build.env); the build fails without them
+        RPI_DT_TAG: ${RPI_DT_TAG}
+        RPI_DT_COMMIT: ${RPI_DT_COMMIT}
+      # shared device tree sources (Dockerfile: COPY --from=dts)
+      additional_contexts:
+        dts: ../dts
+    restart: "no"
+    volumes:
+      - type: bind
+        source: *out_dir
+        target: /out
+    environment:
+      MODEL: ${MODEL:-}
+      SERIAL: ${SERIAL:-}
+      UEFI_BUILD_TYPE: ${UEFI_BUILD_TYPE:-}
+      UEFI_BOOT_TIMEOUT: ${UEFI_BOOT_TIMEOUT:-}
+      UEFI_SYSTEM_TABLE: ${UEFI_SYSTEM_TABLE:-}
+      UEFI_RPI5_DT: ${UEFI_RPI5_DT:-}
+      UEFI_RAM_LIMIT_3GB: ${UEFI_RAM_LIMIT_3GB:-}
+      UEFI_IPV6: ${UEFI_IPV6:-}
+      UEFI_HDMI_MODE: ${UEFI_HDMI_MODE:-}
+      CONSOLE_MAIN: ${CONSOLE_MAIN:-}
+      START_ELF_VERSION: ${START_ELF_VERSION:-}
+      DTB_VERSION: ${DTB_VERSION:-}
+      DTBO_VERSION: ${DTBO_VERSION:-}
+      FORCE_UEFI_REBUILD: ${FORCE_UEFI_REBUILD:-0}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}

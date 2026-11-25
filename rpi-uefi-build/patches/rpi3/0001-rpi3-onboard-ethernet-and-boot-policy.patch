@@ -1,0 +1,39 @@
+diff --git a/Platform/RaspberryPi/RPi3/RPi3.dsc b/Platform/RaspberryPi/RPi3/RPi3.dsc
+index 92dbbf8..829bfd9 100644
+--- a/Platform/RaspberryPi/RPi3/RPi3.dsc
++++ b/Platform/RaspberryPi/RPi3/RPi3.dsc
+@@ -698,6 +698,13 @@
+   MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassStorageDxe.inf
+   Drivers/ASIX/Bus/Usb/UsbNetworking/Ax88772c/Ax88772c.inf
+ 
++  #
++  # Boot Manager Policy: PlatformBootManagerLib asks this protocol to connect
++  # the network devices before it lists the boot options. Without it no
++  # network boot option exists on a first boot.
++  #
++  MdeModulePkg/Universal/BootManagerPolicyDxe/BootManagerPolicyDxe.inf
++
+   #
+   # SD/MMC support
+   #
+diff --git a/Platform/RaspberryPi/RPi3/RPi3.fdf b/Platform/RaspberryPi/RPi3/RPi3.fdf
+index 9a681a5..80f7914 100644
+--- a/Platform/RaspberryPi/RPi3/RPi3.fdf
++++ b/Platform/RaspberryPi/RPi3/RPi3.fdf
+@@ -291,6 +291,16 @@ READ_LOCK_STATUS   = TRUE
+   INF MdeModulePkg/Bus/Usb/UsbKbDxe/UsbKbDxe.inf
+   INF MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassStorageDxe.inf
+   INF Drivers/ASIX/Bus/Usb/UsbNetworking/Ax88772c/Ax88772c.inf
++  INF MdeModulePkg/Universal/BootManagerPolicyDxe/BootManagerPolicyDxe.inf
++
++  #
++  # Driver for the onboard USB Ethernet (LAN9514 on the 3B, LAN7515 on the 3B+):
++  # iPXE built as a UEFI driver. build.sh compiles it to this path.
++  #
++  FILE DRIVER = 5a1f4d3e-7b2c-4f6a-9d1e-3c8b7a6f5e4d {
++    SECTION PE32 = /build/ipxe-usbnic.efi
++    SECTION UI = "IpxeUsbNic"
++  }
+ 
+   #
+   # SD/MMC support

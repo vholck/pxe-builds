@@ -1,0 +1,35 @@
+name: Lint
+
+# Static checks only; nothing is built or deployed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Shell scripts (shellcheck)
+        run: |
+          git ls-files '*.sh' | xargs shellcheck --severity=warning
+
+      - name: Workflows (actionlint)
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
+      - name: Compose files of the local builds
+        run: |
+          set -eu
+          for f in */docker-compose.yml; do
+            echo "== $f"
+            docker compose -f "$f" --env-file build.env config --quiet
+          done

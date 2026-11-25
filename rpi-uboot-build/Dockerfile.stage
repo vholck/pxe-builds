@@ -1,0 +1,9 @@
+# Packages a finished build (the tftp/ tree written by build.sh) into the small
+# image the pxe stack's rpi-uboot-stage service runs. Built in CI by
+# .github/workflows/build-rpi-uboot.yml; the build context must contain tftp/.
+FROM alpine:3.24
+
+COPY tftp/ /assets/tftp/
+COPY stage.sh /stage.sh
+
+ENTRYPOINT ["/bin/sh", "/stage.sh"]

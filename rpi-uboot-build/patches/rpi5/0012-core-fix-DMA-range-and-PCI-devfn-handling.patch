@@ -1,0 +1,29 @@
+From fc595789308822aafe38c7659609263e6eb4ea69 Mon Sep 17 00:00:00 2001
+From: appkins <13772502+appkins@users.noreply.github.com>
+Date: Mon, 16 Mar 2026 13:02:43 -0500
+Subject: [PATCH 13/15] core: fix DMA range and PCI devfn handling
+
+Fix DMA range translation in of_addr.c and device utility
+functions in util.c for correct bus address handling on
+BCM2712.
+
+Link: https://github.com/sidero-community/u-boot
+Signed-off-by: appkins <13772502+appkins@users.noreply.github.com>
+[Regenerated against U-Boot v2026.04, then rebased onto v2026.10, from siderolabs/sbc-raspberrypi pull request 88:
+ artifacts/u-boot/patches/0013-core-fix-DMA-range-and-PCI-devfn-handling.patch]
+---
+diff --git a/drivers/core/of_addr.c b/drivers/core/of_addr.c
+index 250dd175b5..7a3cfb7e4b 100644
+--- a/drivers/core/of_addr.c
++++ b/drivers/core/of_addr.c
+@@ -374,8 +374,8 @@ int of_get_dma_range(const struct device_node *dev, phys_addr_t *cpu,
+ 	}
+ 
+ 	/* Get the address sizes both for the bus and its parent */
+-	bus_node = of_match_bus((struct device_node*)dev);
+-	bus_node->count_cells(dev, &na, &ns);
++	na = of_simple_addr_cells(dev);
++	ns = of_simple_size_cells(dev);
+ 	if (!OF_CHECK_COUNTS(na, ns)) {
+ 		printf("Bad cell count for %s\n", of_node_full_name(dev));
+ 		ret = -EINVAL;

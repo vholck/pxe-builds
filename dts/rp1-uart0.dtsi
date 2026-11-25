@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * UART0 of the RP1 (GPIO 14 and 15, the pins of the Pi 3 and Pi 4 console)
+ * for the upstream Linux device trees of the Raspberry Pi 5. Upstream has no
+ * node for it yet (checked 2026-11-21 in U-Boot v2026.10 dts/upstream and
+ * Linux master), so a distribution kernel had no console on these pins.
+ *
+ * Included after the board tree by build-rpi-upstream.sh. See README.md.
+ *
+ * - "arm,sbsa-uart", not "arm,pl011" + "arm,primecell": an AMBA device claims
+ *   its registers when it is created, and rp1_pci already holds the BAR, so
+ *   the PL011 driver failed with EBUSY. The SBSA driver needs no clocks and
+ *   keeps the 115200 baud set up by the firmware (UEFI) or U-Boot.
+ * - Enabled here, as upstream's Pi 3 and Pi 4 trees ship their console UART
+ *   (the mini UART) enabled: a tree a boot loader loads with `fdt` gets no
+ *   firmware fixups under UEFI, and its console must work anyway. Every
+ *   config.txt of this stack sets enable_uart=1; the Pi firmware still
+ *   applies the uart0/uart0_console parameters below when it loads this tree
+ *   itself (UEFI), and U-Boot adds alias console (patches/rpi5/0021).
+ * - stdout-path names it, so Linux uses it as its console without a
+ *   console= argument. When a display is present, EDK2 (ConsolePrefDxe) and
+ *   U-Boot (patches/0007) remove stdout-path, and Linux uses the display,
+ *   unless CONSOLE_MAIN=serial.
+ * - The tree must be built with symbols (dtc -@): without them the Pi
+ *   firmware cannot apply config.txt parameters and logs "no symbols found".
+ */
+
+#include <dt-bindings/interrupt-controller/irq.h>
+
+&pci_ep_bus {
+	uart0: serial@40030000 {
+		compatible = "arm,sbsa-uart";
+		reg = <0x00 0x40030000 0x00 0x100>;
+		interrupts = <25 IRQ_TYPE_LEVEL_HIGH>;	/* RP1_INT_UART0 */
+		current-speed = <115200>;
+		status = "okay";
+	};
+};
+
+/ {
+	aliases: aliases {
+		serial0 = &uart0;
+		uart0 = &uart0;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	/* as in Raspberry Pi's bcm2712-rpi.dtsi */
+	__overrides__ {
+		uart0 = <&uart0>, "status";
+		uart0_console = <&uart0>, "status", <&aliases>, "console=", &uart0;
+	};
+};

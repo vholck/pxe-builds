@@ -1,0 +1,84 @@
+diff --git a/src/core/fdt.c b/src/core/fdt.c
+index 8ac781b..bb1f95f 100644
+--- a/src/core/fdt.c
++++ b/src/core/fdt.c
+@@ -1396,6 +1396,60 @@ static int fdt_bootargs ( struct fdt *fdt, const char *cmdline,
+ 	return 0;
+ }
+ 
++/**
++ * Carry over firmware-provided properties from the system device tree
++ *
++ * @v fdt		Device tree (loaded from an image)
++ * @ret rc		Return status code
++ *
++ * A device tree loaded from an image knows nothing about the board it
++ * runs on.  Copy what only the firmware can know: the MAC address of
++ * the first Ethernet device (without it, a driver may pick a random
++ * one), and the firmware's console choice (no "stdout-path" in the
++ * system tree means the firmware chose not to name a serial console).
++ */
++static int fdt_inherit ( struct fdt *fdt ) {
++	static const uint8_t zero_mac[6];
++	struct fdt_descriptor desc;
++	struct fdt_descriptor old;
++	unsigned int sysoffset;
++	unsigned int offset;
++	int rc;
++
++	/* Do nothing if there is no system device tree */
++	if ( ! sysfdt.len )
++		return 0;
++
++	/* Copy MAC address of the first Ethernet device */
++	if ( ( fdt_alias ( &sysfdt, "ethernet0", &sysoffset ) == 0 ) &&
++	     ( fdt_property ( &sysfdt, sysoffset, "local-mac-address",
++			      &desc ) == 0 ) &&
++	     ( desc.len == sizeof ( zero_mac ) ) &&
++	     ( memcmp ( desc.data, zero_mac, sizeof ( zero_mac ) ) != 0 ) &&
++	     ( fdt_alias ( fdt, "ethernet0", &offset ) == 0 ) ) {
++		DBGC ( fdt, "FDT copying local-mac-address from system "
++		       "tree\n" );
++		if ( ( rc = fdt_set ( fdt, offset, "local-mac-address",
++				      desc.data, desc.len ) ) != 0 )
++			return rc;
++	}
++
++	/* Remove "stdout-path" if the firmware removed it */
++	if ( ( fdt_path ( &sysfdt, "/chosen", &sysoffset ) == 0 ) &&
++	     ( fdt_property ( &sysfdt, sysoffset, "stdout-path",
++			      &desc ) != 0 ) &&
++	     ( fdt_path ( fdt, "/chosen", &offset ) == 0 ) &&
++	     ( fdt_property ( fdt, offset, "stdout-path", &old ) == 0 ) ) {
++		DBGC ( fdt, "FDT removing stdout-path (absent in system "
++		       "tree)\n" );
++		if ( ( rc = fdt_set ( fdt, offset, "stdout-path",
++				      NULL, 0 ) ) != 0 )
++			return rc;
++	}
++
++	return 0;
++}
++
+ /**
+  * Create device tree
+  *
+@@ -1436,6 +1490,10 @@ int fdt_create ( struct fdt_header **hdr, const char *cmdline,
+ 	fdt.raw = copy;
+ 	fdt.realloc = fdt_urealloc;
+ 
++	/* Carry over firmware-provided properties into an image's tree */
++	if ( image && ( ( rc = fdt_inherit ( &fdt ) ) != 0 ) )
++		goto err_inherit;
++
+ 	/* Populate boot arguments */
+ 	if ( ( rc = fdt_bootargs ( &fdt, cmdline, initrd, initrd_len ) ) != 0 )
+ 		goto err_bootargs;
+@@ -1445,6 +1503,7 @@ int fdt_create ( struct fdt_header **hdr, const char *cmdline,
+ 	return 0;
+ 
+  err_bootargs:
++ err_inherit:
+ 	ufree ( fdt.raw );
+  err_alloc:
+  err_image:

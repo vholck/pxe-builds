@@ -1,0 +1,33 @@
+Subject: [PATCH] mmc: bcm2835_sdhost: forget a failed command
+
+bcm2835_finish_command() and bcm2835_transmit() return early on an error and
+leave host->cmd (and host->data, host->use_busy) set. The next command then
+trips WARN_ON(host->cmd) in bcm2835_send_command(). On a Raspberry Pi 3 without
+an SD card every probe of the slot times out, so the console fills with
+"WARNING at drivers/mmc/bcm2835_sdhost.c:414" lines.
+
+Clear the request state when bcm2835_send_cmd() fails, as Linux does in
+bcm2835_finish_request().
+---
+diff --git a/drivers/mmc/bcm2835_sdhost.c b/drivers/mmc/bcm2835_sdhost.c
+index 72012746..8fa9fc86 100644
+--- a/drivers/mmc/bcm2835_sdhost.c
++++ b/drivers/mmc/bcm2835_sdhost.c
+@@ -708,6 +708,17 @@ static int bcm2835_send_cmd(struct udevice *dev, struct mmc_cmd *cmd,
+ 			break;
+ 	}
+ 
++	/*
++	 * A failed request is over: forget it, as Linux does in
++	 * bcm2835_finish_request(). Otherwise the next command finds host->cmd
++	 * still set and WARN_ON() fires, e.g. on every probe of an empty slot.
++	 */
++	if (ret) {
++		host->cmd = NULL;
++		host->data = NULL;
++		host->use_busy = false;
++	}
++
+ 	return ret;
+ }
+ 

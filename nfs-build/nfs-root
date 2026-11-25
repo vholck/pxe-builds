@@ -1,0 +1,252 @@
+#!/bin/sh
+# Manage per-machine NFS roots of the pxe stack's nfs service. Run it inside
+# the service's container on the boot host:
+#   docker exec pxe-nfs-1 nfs-root <command> ...
+#
+#   list                   the clean roots (/ro) and the machine roots (/rw)
+#   create <clean> <name>  copy /ro/<clean> to /rw/<name> (fails if it exists)
+#   create --layered <clean> <name>
+#                          /rw/<name> without a copy: the clean root plus a
+#                          layer that holds only this machine's changes
+#   reset  <clean> <name>  delete /rw/<name> and make it again from
+#                          /ro/<clean>, as a copy or layered as it was
+#   delete <name>          delete /rw/<name>
+#   save   <name> <clean>  copy /rw/<name> to /ro/<clean> as a new clean root
+#                          (fails if it exists): boot a machine from its own
+#                          copy, install and set up what you want, power it
+#                          off, save
+#
+# A copy gets its own identity: /etc/hostname = <name> (if the clean root has
+# /etc), an empty /etc/machine-id (systemd makes a new one at the first
+# boot), and new SSH host keys if the clean root has host keys.
+# Power the machine off before reset or delete: its root disappears under it.
+#
+# A layered root is an overlay mount made in this container (clean root below,
+# the machine's layer in layers/<name>/ above) with an NFS export of its own.
+# It costs only the space of the changes and is made or reset at once. Its
+# clean root must not change or go away while layered roots use it: update
+# by saving a new clean root under a new name.
+set -eu
+
+DATA=/srv/nfs
+LAYERS=$DATA/layers
+LAYERS_CONF=/etc/ganesha/layers.conf
+
+die() { echo "nfs-root: $*" >&2; exit 1; }
+
+check_name() {
+  case "$1" in
+    ''|.*|*/*) die "invalid name '$1' (a plain directory name, not starting with a dot)" ;;
+  esac
+  printf '%s' "$1" | grep -Eq '^[A-Za-z0-9._-]+$' || die "invalid name '$1' (letters, digits, . _ - only)"
+}
+
+# A new root's own identity
+identity() {
+  r=$1
+  if [ -d "$r/etc" ]; then echo "$2" > "$r/etc/hostname"; fi
+  # Debian's line for the machine's own name, so the name resolves locally
+  if [ -f "$r/etc/hosts" ] && grep -q '^127\.0\.1\.1[[:space:]]' "$r/etc/hosts"; then
+    sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1 $2/" "$r/etc/hosts"
+  fi
+  if [ -f "$r/etc/machine-id" ]; then : > "$r/etc/machine-id"; fi
+  # A second copy of the ID that some installers leave (debootstrap does):
+  # with an empty /etc/machine-id systemd takes the ID from it, and every
+  # machine made from the same clean root would have the same one.
+  if [ -f "$r/var/lib/dbus/machine-id" ] && [ ! -L "$r/var/lib/dbus/machine-id" ]; then
+    rm -f "$r/var/lib/dbus/machine-id"
+  fi
+  if ls "$r"/etc/ssh/ssh_host_*_key >/dev/null 2>&1; then
+    rm -f "$r"/etc/ssh/ssh_host_*_key "$r"/etc/ssh/ssh_host_*_key.pub
+    ssh-keygen -q -A -f "$r"
+  fi
+}
+
+is_layered() { [ -f "$LAYERS/$1/base" ]; }
+
+# Mount a layered root at /rw/<name>. index and nfs_export make the overlay
+# usable through an NFS server; redirect_dir lets directories of the clean
+# root be renamed.
+mount_layer() {
+  l=$LAYERS/$1
+  base=$(cat "$l/base")
+  if [ ! -d "$DATA/ro/$base" ]; then
+    echo "nfs-root: layered root $1: its clean root /ro/$base is missing; not mounted" >&2
+    return 1
+  fi
+  mkdir -p "$l/upper" "$l/work" "$DATA/rw/$1"
+  if mountpoint -q "$DATA/rw/$1"; then return 0; fi
+  mount -t overlay "nfs-root-$1" \
+    -o "lowerdir=$DATA/ro/$base,upperdir=$l/upper,workdir=$l/work,index=on,nfs_export=on,redirect_dir=on,metacopy=off" \
+    "$DATA/rw/$1"
+}
+
+# Each layered root is a file system of its own and needs its own export
+# (ganesha does not cross into it from the /rw export). The export number is
+# part of the clients' file handles: it is kept in the layer's directory.
+write_layer_exports() {
+  clients=${NFS_CLIENTS:-${LAN_SUBNET:-192.168.1.0/24}}
+  mkdir -p /etc/ganesha
+  {
+    echo "# Written by nfs-root: one export per layered root."
+    for b in "$LAYERS"/*/base; do
+      [ -f "$b" ] || continue
+      l=${b%/base}; n=${l##*/}
+      mountpoint -q "$DATA/rw/$n" || continue
+      printf 'EXPORT {\n    Export_Id = %s;\n    Path = %s;\n    Pseudo = /rw/%s;\n    CLIENT { Clients = %s; Access_Type = RW; }\n    FSAL { Name = VFS; }\n}\n' \
+        "$(cat "$l/export-id")" "$DATA/rw/$n" "$n" "$clients"
+    done
+  } > "$LAYERS_CONF.new"
+  mv "$LAYERS_CONF.new" "$LAYERS_CONF"
+}
+
+# Have the running server read the exports again (SIGHUP).
+reload_exports() {
+  pid=$(pidof ganesha.nfsd || true)
+  if [ -n "$pid" ]; then kill -HUP "$pid"; sleep 2; fi
+}
+
+next_export_id() {
+  max=99
+  for f in "$LAYERS"/*/export-id; do
+    [ -f "$f" ] || continue
+    i=$(cat "$f"); [ "$i" -gt "$max" ] && max=$i
+  done
+  echo $((max + 1))
+}
+
+layer_root() {
+  clean=$1 name=$2
+  check_name "$clean"; check_name "$name"
+  [ -d "$DATA/ro/$clean" ] || die "no clean root $DATA/ro/$clean"
+  [ -e "$DATA/rw/$name" ] && die "$DATA/rw/$name exists"
+  [ -e "$LAYERS/$name" ] && die "$LAYERS/$name exists"
+  l=$LAYERS/$name
+  id=$(next_export_id)
+  mkdir -p "$l.partial/upper" "$l.partial/work"
+  echo "$id" > "$l.partial/export-id"
+  echo "$clean" > "$l.partial/base"
+  mv "$l.partial" "$l"
+  mount_layer "$name" || die "cannot mount the layered root"
+  identity "$DATA/rw/$name" "$name"
+  write_layer_exports
+  reload_exports
+  echo "nfs-root: /rw/$name ready (layered on /ro/$clean)"
+}
+
+copy_root() {
+  clean=$1 name=$2
+  check_name "$clean"; check_name "$name"
+  src=$DATA/ro/$clean dst=$DATA/rw/$name
+  [ -d "$src" ] || die "no clean root $src"
+  [ -e "$dst" ] && die "$dst exists"
+  echo "nfs-root: copying /ro/$clean to /rw/$name ..."
+  # cp -a keeps owners, modes, hard links, symlinks, special files and times;
+  # reflinks make it instant where the host file system has them (Btrfs, XFS).
+  cp -a --reflink=auto "$src" "$dst.partial"
+  identity "$dst.partial" "$name"
+  mv "$dst.partial" "$dst"
+  echo "nfs-root: /rw/$name ready ($(du -sh "$dst" | cut -f1))"
+}
+
+delete_root() {
+  check_name "$1"
+  dst=$DATA/rw/$1
+  rm -rf "$dst.partial" "$LAYERS/$1.partial"
+  if is_layered "$1"; then
+    # Export away first, so the server lets go of the mount
+    mv "$LAYERS/$1/base" "$LAYERS/$1/base.deleted"
+    write_layer_exports
+    reload_exports
+    i=0
+    while mountpoint -q "$dst" && ! umount "$dst" 2>/dev/null; do
+      i=$((i + 1))
+      if [ $i -ge 10 ]; then umount -l "$dst"; break; fi
+      sleep 1
+    done
+    rm -rf "${LAYERS:?}/$1"
+    rmdir "$dst" 2>/dev/null || true
+    echo "nfs-root: /rw/$1 deleted (layered)"
+  elif [ -e "$dst" ]; then
+    rm -rf "$dst"
+    echo "nfs-root: /rw/$1 deleted"
+  fi
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  list)
+    echo "clean roots (/ro):"
+    for d in "$DATA/ro"/*; do
+      [ -d "$d" ] || continue
+      echo "  ${d##*/}"
+    done
+    echo "machine roots (/rw):"
+    for d in "$DATA/rw"/*; do
+      [ -d "$d" ] || continue
+      n=${d##*/}
+      if is_layered "$n"; then
+        echo "  $n  (layered on /ro/$(cat "$LAYERS/$n/base"), changes: $(du -sh "$LAYERS/$n/upper" | cut -f1))"
+      else
+        echo "  $n"
+      fi
+    done ;;
+  create)
+    if [ "${1:-}" = --layered ]; then
+      [ $# -eq 3 ] || die "usage: nfs-root create --layered <clean> <name>"
+      layer_root "$2" "$3"
+    else
+      [ $# -eq 2 ] || die "usage: nfs-root create [--layered] <clean> <name>"
+      copy_root "$1" "$2"
+    fi ;;
+  reset)
+    [ $# -eq 2 ] || die "usage: nfs-root reset <clean> <name>"
+    check_name "$1"; check_name "$2"
+    [ -d "$DATA/ro/$1" ] || die "no clean root $DATA/ro/$1"
+    if is_layered "$2"; then
+      delete_root "$2"
+      layer_root "$1" "$2"
+    else
+      delete_root "$2"
+      copy_root "$1" "$2"
+    fi ;;
+  mount-layers)
+    # For start.sh, before the server starts: mount every layered root and
+    # write their exports.
+    mkdir -p "$LAYERS"
+    for b in "$LAYERS"/*/base; do
+      [ -f "$b" ] || continue
+      l=${b%/base}
+      mount_layer "${l##*/}" || true
+    done
+    write_layer_exports ;;
+  save)
+    [ $# -eq 2 ] || die "usage: nfs-root save <name> <clean>"
+    check_name "$1"; check_name "$2"
+    src=$DATA/rw/$1 dst=$DATA/ro/$2
+    [ -d "$src" ] || die "no machine root $src"
+    [ -e "$dst" ] && die "$dst exists"
+    echo "nfs-root: copying /rw/$1 to /ro/$2 ..."
+    rm -rf "$dst.partial"
+    cp -a --reflink=auto "$src" "$dst.partial"
+    # A clean root has no machine ID: copies and read-only users get their own
+    if [ -f "$dst.partial/etc/machine-id" ]; then : > "$dst.partial/etc/machine-id"; fi
+    if [ -f "$dst.partial/var/lib/dbus/machine-id" ] && [ ! -L "$dst.partial/var/lib/dbus/machine-id" ]; then
+      rm -f "$dst.partial/var/lib/dbus/machine-id"
+    fi
+    mv "$dst.partial" "$dst"
+    echo "nfs-root: /ro/$2 ready ($(du -sh "$dst" | cut -f1))" ;;
+  delete)
+    [ $# -eq 1 ] || die "usage: nfs-root delete <name>"
+    check_name "$1"
+    # A name that is not a machine root is an error, not a silent success. A
+    # clean root is not deleted here: layered roots may use it.
+    if [ ! -e "$DATA/rw/$1" ] && ! is_layered "$1"; then
+      [ -e "$DATA/ro/$1" ] && die "/rw/$1 does not exist; /ro/$1 is a clean root: delete it on the host (<pxe data dir>/nfs/ro/$1) once no layered root uses it (see list)"
+      die "/rw/$1 does not exist (see list)"
+    fi
+    delete_root "$1" ;;
+  *)
+    sed -n '2,29s/^# \{0,1\}//p' "$0"; [ -z "$cmd" ] || exit 2 ;;
+esac

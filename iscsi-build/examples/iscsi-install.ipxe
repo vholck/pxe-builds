@@ -1,0 +1,49 @@
+#!ipxe
+# Boot this machine from its own network disk on the pxe stack's iscsi
+# service, and install the OS onto the disk first if it is empty. For
+# systems that install themselves with their own installer from a live
+# system: Fedora CoreOS (disk fcos-<mac>). Not Flatcar: its installed system
+# cannot start from an iSCSI disk (matchbox/README.md).
+#
+# Where it goes: the TFTP root on the boot host, as the host script of each
+# machine (MAC lower-case, with hyphens), e.g.
+#   dockerdata/pxe/tftp/ipxe/hosts/52-54-00-09-01-02.ipxe
+# The line "set os" below is the first part of the disk's name; it must
+# match the disk= value in the Matchbox install profile.
+#
+# The disk: dockerdata/pxe/iscsi/disks/<os>-<mac>.raw, made empty with
+#   docker exec pxe-iscsi-1 iscsi-disk new fcos-52-54-00-09-01-02 10G
+#
+# What happens:
+#   1. sanhook attaches the disk and describes it in the firmware table
+#      (iBFT); the installed system finds its disk and its address there at
+#      every boot (kernel arguments rd.iscsi.firmware=1 ...).
+#   2. sanboot boots the disk. On an empty disk there is nothing to boot
+#      (no boot sector under BIOS, no EFI loader under UEFI) and it fails;
+#      the disk stays attached.
+#   3. Then this script asks Matchbox, whose group for this machine gives the
+#      install profile (fedora-coreos-iscsi-install-x86_64): a live system
+#      that installs onto the
+#      disk and reboots. The live system's install step refuses a disk that
+#      is not empty, so a disk that fails to boot for another reason is not
+#      overwritten.
+# Root path: iscsi:<server>:<protocol>:<port>:<LUN>:<target>, LUN 1 (tgt's
+# LUN 0 is its controller). ${next-server} is the boot server.
+
+set os fcos
+set disk ${os}-${netX/mac:hexhyp}
+echo Network disk ${disk} on ${next-server}
+sanhook --drive 0x80 iscsi:${next-server}:::1:iqn.2026-11.pxe.stack:${disk} || goto failed
+sanboot --drive 0x80 ||
+echo Nothing to boot on ${disk}: starting the installer from Matchbox
+chain --autofree tftp://${next-server}/ipxe/matchbox.ipxe ||
+echo The installer did not start: is there a Matchbox group with the install profile for this machine?
+sanunhook --drive 0x80 ||
+goto end
+
+:failed
+echo sanhook failed: is there a disk ${disk} (iscsi-disk list)?
+:end
+echo Going on with the normal boot in 5 seconds
+sleep 5
+exit 1

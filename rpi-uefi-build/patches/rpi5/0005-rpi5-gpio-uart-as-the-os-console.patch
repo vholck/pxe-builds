@@ -1,0 +1,85 @@
+diff --git a/Platform/RaspberryPi/Drivers/FdtDxe/FdtDxe.c b/Platform/RaspberryPi/Drivers/FdtDxe/FdtDxe.c
+index d63084d..7b14aeb 100644
+--- a/Platform/RaspberryPi/Drivers/FdtDxe/FdtDxe.c
++++ b/Platform/RaspberryPi/Drivers/FdtDxe/FdtDxe.c
+@@ -435,6 +435,66 @@ SyncPcie (
+   return EFI_SUCCESS;
+ }
+ 
++/**
++  Raspberry Pi's Pi 5 tree names the debug connector's UART as the console
++  (stdout-path = "serial10:..."), while its Pi 3 and Pi 4 trees name serial0,
++  the UART on GPIO 14 and 15, which is serial0 on the Pi 5 too. With that UART
++  enabled (enable_uart=1, applied by the Pi firmware), name serial0, so the OS
++  console is on the same pins on every Pi. ConsolePrefDxe still removes
++  stdout-path when a display is the main console. Trees that already name
++  another UART (the upstream ones, serial0) are left alone.
++
++  @retval EFI_SUCCESS       Done, or nothing to do
++  @retval EFI_DEVICE_ERROR  The property could not be set
++**/
++STATIC
++EFI_STATUS
++GpioUartConsole (
++  VOID
++  )
++{
++  STATIC CONST CHAR8  Console[] = "serial0:115200n8";
++  INT32               Chosen;
++  INT32               Aliases;
++  INT32               Node;
++  INT32               Retval;
++  CONST CHAR8         *Path;
++  CONST CHAR8         *State;
++
++  Chosen = FdtPathOffset (mFdtImage, "/chosen");
++  if (Chosen < 0) {
++    return EFI_SUCCESS;
++  }
++  Path = FdtGetProp (mFdtImage, Chosen, "stdout-path", NULL);
++  if ((Path == NULL) || (AsciiStrnCmp (Path, "serial10", 8) != 0)) {
++    return EFI_SUCCESS;
++  }
++  Aliases = FdtPathOffset (mFdtImage, "/aliases");
++  if (Aliases < 0) {
++    return EFI_SUCCESS;
++  }
++  Path = FdtGetProp (mFdtImage, Aliases, "serial0", NULL);
++  if (Path == NULL) {
++    return EFI_SUCCESS;
++  }
++  Node = FdtPathOffset (mFdtImage, Path);
++  if (Node < 0) {
++    return EFI_SUCCESS;
++  }
++  State = FdtGetProp (mFdtImage, Node, "status", NULL);
++  if ((State != NULL) && (AsciiStrCmp (State, "okay") != 0) &&
++      (AsciiStrCmp (State, "ok") != 0)) {
++    return EFI_SUCCESS;           // GPIO UART off (no enable_uart=1)
++  }
++  Retval = FdtSetProp (mFdtImage, Chosen, "stdout-path", Console, sizeof (Console));
++  if (Retval != 0) {
++    DEBUG ((DEBUG_ERROR, "%a: could not set stdout-path: %d\n", __func__, Retval));
++    return EFI_DEVICE_ERROR;
++  }
++  DEBUG ((DEBUG_INFO, "%a: OS console on the GPIO UART (serial0)\n", __func__));
++  return EFI_SUCCESS;
++}
++
+ /** Vendor GUID of the FdtFile variable (the same in rpi-uboot-build) */
+ STATIC EFI_GUID mFdtFileVarGuid = {
+   0xeedf58fc, 0x1b9b, 0x4ab0, { 0x8b, 0x6b, 0x95, 0x4d, 0x79, 0xd6, 0xb0, 0x52 }
+@@ -611,6 +671,13 @@ FdtDxeInitialize (
+     DEBUG ((DEBUG_ERROR, "Failed to clean frame buffer: %r\n", Status));
+   }
+ 
++  if (BoardRevisionGetModelFamily (mBoardRevision) >= 5) {
++    Status = GpioUartConsole ();
++    if (EFI_ERROR (Status)) {
++      DEBUG ((DEBUG_ERROR, "Failed to put the console on the GPIO UART: %r\n", Status));
++    }
++  }
++
+   if (BoardRevisionGetModelFamily (mBoardRevision) < 5) {
+     Status = SanitizePSCI ();
+     if (EFI_ERROR (Status)) {

@@ -1,0 +1,15 @@
+diff --git a/Platform/RaspberryPi/RPi4/RPi4.dsc b/Platform/RaspberryPi/RPi4/RPi4.dsc
+index f223be2..92a570a 100644
+--- a/Platform/RaspberryPi/RPi4/RPi4.dsc
++++ b/Platform/RaspberryPi/RPi4/RPi4.dsc
+@@ -399,6 +399,10 @@
+   gArmTokenSpaceGuid.PcdSystemMemoryBase|0x00400000
+   gArmTokenSpaceGuid.PcdSystemMemorySize|0x3fc00000
+ 
++  # The Pi firmware may put a device tree of up to 128 KB here (config.txt
++  # device_tree_end=0x400000); map all of it, as the Pi 5 does.
++  gRaspberryPiTokenSpaceGuid.PcdFdtSize|0x20000
++
+   #
+   # Device specific addresses
+   #

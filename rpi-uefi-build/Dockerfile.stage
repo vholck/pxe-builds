@@ -1,0 +1,10 @@
+# Packages finished UEFI builds into the small image the pxe stack's
+# rpi-uefi-stage service runs. Built in CI by .github/workflows/build-rpi-uefi.yml;
+# the build context must contain uefi/rpi3/, uefi/rpi4/ and uefi/rpi5/ (the
+# generic-<model>/ trees written by build.sh).
+FROM alpine:3.24
+
+COPY uefi/ /assets/uefi/
+COPY stage.sh /stage.sh
+
+ENTRYPOINT ["/bin/sh", "/stage.sh"]

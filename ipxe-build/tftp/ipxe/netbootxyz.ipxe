@@ -1,0 +1,49 @@
+#!ipxe
+# netboot.xyz entry point. Set IPXE_CHAIN_URI=tftp://<PXE_LAN_IP>/ipxe/netbootxyz.ipxe
+# instead of https://boot.netboot.xyz to use it.
+#
+# netboot.xyz's menu compares ${version} with its own release number and, when they
+# differ (always, for a custom iPXE), chains its own x86 iPXE binary. On arm64 that
+# fails with "Machine type 0x8664 is not supported"; on x86 it replaces this build.
+# Reporting netboot.xyz's current release number makes the menu load directly.
+
+chain --timeout 5000 https://boot.netboot.xyz/version.ipxe ||
+isset ${upstream_version} && set version ${upstream_version} ||
+
+# netboot.xyz signs its menu scripts and checks every one before it runs it
+# (its boot.cfg turns the check on at every menu start; we cannot turn it off).
+# This iPXE trusts netboot.xyz's CA (build setting IPXE_TRUST_NETBOOTXYZ). If
+# netboot.xyz changes its CA, or the setting is 0, every menu entry fails with
+# "Could not verify". Check one signature here and, if it fails, say on screen
+# how to switch the checks off in the menu. A download failure is not reported
+# here: the menu itself would fail the same way and show it. imgverify removes
+# the signature image itself (pass or fail); only the menu copy is freed below.
+imgfetch --timeout 5000 --name nbx-menu https://boot.netboot.xyz/menu.ipxe || goto sig_done
+imgfetch --timeout 5000 --name nbx-sig http://boot.netboot.xyz/sigs/menu.ipxe.sig || goto sig_free
+imgverify nbx-menu nbx-sig && goto sig_free ||
+set sig_err ${errno}
+echo
+echo netboot.xyz signature check FAILED (error ${sig_err}): this iPXE does not trust
+echo the certificate netboot.xyz signs with. netboot.xyz may have changed its CA.
+echo Every menu entry will then fail with: Could not verify: Permission denied
+echo
+echo To boot anyway: in the menu, go down to Signature Checks at the bottom,
+echo select netboot.xyz [ enabled: true ] and press Enter until it shows
+echo enabled: false, then choose the menu entry again. This lasts until reboot.
+echo
+echo Lasting fix: rebuild iPXE with netboot.xyz's current CA certificate
+echo (ipxe-build/certs/ and IPXE_TRUST_NETBOOTXYZ in pxe-builds).
+echo
+imgfetch tftp://${next-server}/ipxe/log/netbootxyz-signature-check-failed-error-${sig_err} ||
+prompt --timeout 30000 Press any key to continue to the menu (or wait 30 s) ||
+:sig_free
+imgfree nbx-menu ||
+:sig_done
+
+# This stack's own menu (Fedora CoreOS) appears in the netboot.xyz main menu as
+# "Custom URL Menu": netboot.xyz offers that entry whenever custom_url is set and
+# chains ${custom_url}/custom.ipxe without a signature check. The menu is
+# published by the coreos-stage; without it the entry fails and returns.
+isset ${custom_url} || set custom_url tftp://${next-server}/ipxe/custom
+
+chain --autofree https://boot.netboot.xyz/menu.ipxe

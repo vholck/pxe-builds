@@ -1,0 +1,19 @@
+diff --git a/src/net/oncrpc/nfs_open.c b/src/net/oncrpc/nfs_open.c
+index d839912..513e81a 100644
+--- a/src/net/oncrpc/nfs_open.c
++++ b/src/net/oncrpc/nfs_open.c
+@@ -370,6 +370,14 @@ static void nfs_step ( struct nfs_request *nfs ) {
+ 	int     rc;
+ 	char    *path_component;
+ 
++	/* The MOUNT reply can arrive before the portmapper has told us
++	 * the NFS port.  Until the NFS connection has been opened, the
++	 * interface is unconnected and reports an unlimited window, so
++	 * wait for the window change of the real connection instead.
++	 */
++	if ( nfs->pm_state < MFS_PORTMAP_CLOSED )
++		return;
++
+ 	if ( ! xfer_window ( &nfs->nfs_intf ) )
+ 		return;
+ 

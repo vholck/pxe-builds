@@ -1,0 +1,150 @@
+diff --git a/Platform/RaspberryPi/RPi5/Drivers/RpiPlatformDxe/Peripherals.c b/Platform/RaspberryPi/RPi5/Drivers/RpiPlatformDxe/Peripherals.c
+index 994485f..5353a7d 100644
+--- a/Platform/RaspberryPi/RPi5/Drivers/RpiPlatformDxe/Peripherals.c
++++ b/Platform/RaspberryPi/RPi5/Drivers/RpiPlatformDxe/Peripherals.c
+@@ -11,9 +11,14 @@
+ #include <IndustryStandard/Bcm2712Pinctrl.h>
+ #include <Library/Bcm2712GpioLib.h>
+ #include <Library/DebugLib.h>
++#include <Library/IoLib.h>
++#include <Library/UefiLib.h>
+ #include <Library/UefiBootServicesTableLib.h>
+ #include <Library/UefiRuntimeServicesTableLib.h>
+ #include <Protocol/BrcmStbSdhciDevice.h>
++#include <Protocol/Rp1Bus.h>
++#include <Protocol/RpiFirmware.h>
++#include <Rp1.h>
+ 
+ #include "Peripherals.h"
+ #include "ConfigTable.h"
+@@ -133,6 +138,76 @@ RegisterPciePlatform (
+   return Status;
+ }
+ 
++//
++// "Specific address 1" registers of the Ethernet controller (Cadence GEM)
++//
++#define RP1_ETH_SPEC_ADDR1_BOTTOM  0x88
++#define RP1_ETH_SPEC_ADDR1_TOP     0x8c
++
++STATIC VOID  *mRp1BusRegistration;
++
++/**
++  Program the board's MAC address into the RP1 Ethernet controller.
++
++  The Raspberry Pi bootloader leaves the controller's address registers
++  empty. A network driver that takes the address from the hardware, as it
++  would from an EEPROM on other boards, then finds none.
++
++  Runs when the RP1 bus driver has found the chip.
++**/
++STATIC
++VOID
++EFIAPI
++Rp1BusNotify (
++  IN EFI_EVENT  Event,
++  IN VOID       *Context
++  )
++{
++  EFI_STATUS                      Status;
++  RP1_BUS_PROTOCOL                *Rp1Bus;
++  RASPBERRY_PI_FIRMWARE_PROTOCOL  *FwProtocol;
++  EFI_PHYSICAL_ADDRESS            EthBase;
++  UINT8                           Mac[6];
++
++  Status = gBS->LocateProtocol (
++                  &gRp1BusProtocolGuid,
++                  mRp1BusRegistration,
++                  (VOID **)&Rp1Bus
++                  );
++  if (EFI_ERROR (Status)) {
++    return;
++  }
++
++  Status = gBS->LocateProtocol (
++                  &gRaspberryPiFirmwareProtocolGuid,
++                  NULL,
++                  (VOID **)&FwProtocol
++                  );
++  if (!EFI_ERROR (Status)) {
++    Status = FwProtocol->GetMacAddress (Mac);
++  }
++
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, "%a: Failed to get the MAC address. Status=%r\n", __func__, Status));
++    return;
++  }
++
++  EthBase = Rp1Bus->GetPeripheralBase (Rp1Bus) + RP1_ETH_BASE;
++
++  //
++  // A write to the bottom register switches the address match off, a write
++  // to the top register switches it on again.
++  //
++  MmioWrite32 (
++    EthBase + RP1_ETH_SPEC_ADDR1_BOTTOM,
++    Mac[0] | (Mac[1] << 8) | (Mac[2] << 16) | ((UINT32)Mac[3] << 24)
++    );
++  MmioWrite32 (
++    EthBase + RP1_ETH_SPEC_ADDR1_TOP,
++    Mac[4] | (Mac[5] << 8)
++    );
++}
++
+ EFI_STATUS
+ EFIAPI
+ SetupPeripherals (
+@@ -144,6 +219,14 @@ SetupPeripherals (
+   RegisterSdControllers ();
+   RegisterPciePlatform ();
+ 
++  EfiCreateProtocolNotifyEvent (
++    &gRp1BusProtocolGuid,
++    TPL_CALLBACK,
++    Rp1BusNotify,
++    NULL,
++    &mRp1BusRegistration
++    );
++
+   return EFI_SUCCESS;
+ }
+ 
+diff --git a/Platform/RaspberryPi/RPi5/Drivers/RpiPlatformDxe/RpiPlatformDxe.inf b/Platform/RaspberryPi/RPi5/Drivers/RpiPlatformDxe/RpiPlatformDxe.inf
+index ca2f12d..68fde43 100644
+--- a/Platform/RaspberryPi/RPi5/Drivers/RpiPlatformDxe/RpiPlatformDxe.inf
++++ b/Platform/RaspberryPi/RPi5/Drivers/RpiPlatformDxe/RpiPlatformDxe.inf
+@@ -42,6 +42,7 @@
+   DevicePathLib
+   DxeServicesTableLib
+   HiiLib
++  IoLib
+   MemoryAllocationLib
+   PeCoffGetEntryPointLib
+   UefiLib
+@@ -57,6 +58,7 @@
+   gEfiAcpiSdtProtocolGuid                     ## CONSUMES
+   gBrcmStbSdhciDeviceProtocolGuid             ## PRODUCES
+   gRp1BusProtocolGuid                         ## CONSUMES
++  gRaspberryPiFirmwareProtocolGuid            ## CONSUMES
+   gEfiPciIoProtocolGuid                       ## CONSUMES
+   gBcm2712PciePlatformProtocolGuid            ## PRODUCES
+ 
+diff --git a/Platform/RaspberryPi/RPi5/RPi5.fdf b/Platform/RaspberryPi/RPi5/RPi5.fdf
+index 19b169a..e4a2dc0 100644
+--- a/Platform/RaspberryPi/RPi5/RPi5.fdf
++++ b/Platform/RaspberryPi/RPi5/RPi5.fdf
+@@ -299,6 +299,14 @@ READ_LOCK_STATUS   = TRUE
+   #
+   INF Silicon/RaspberryPi/RpiSiliconPkg/Drivers/Rp1BusDxe/Rp1BusDxe.inf
+ 
++  #
++  # RP1 Ethernet: iPXE built as a UEFI driver. build.sh compiles it to this path.
++  #
++  FILE DRIVER = 7d1e3a52-6c0b-4b8e-a2f4-51c9d0e8b6a3 {
++    SECTION PE32 = /build5/ipxe-rp1gem.efi
++    SECTION UI = "IpxeRp1Gem"
++  }
++
+   #
+   # NVMe boot devices
+   #

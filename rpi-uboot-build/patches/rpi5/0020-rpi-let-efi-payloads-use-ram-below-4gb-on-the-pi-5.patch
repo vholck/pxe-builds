@@ -1,0 +1,194 @@
+From b090183d2fb3dfcd0834535bfc1d5ece7c9746ca Mon Sep 17 00:00:00 2001
+From: vholck/stacks <noreply@example.invalid>
+Date: Fri, 20 Nov 2026 22:59:38 +0100
+Subject: [PATCH] rpi: let EFI payloads use RAM below 4GB on the Raspberry Pi 5
+
+The generic lmb_add_memory() reserves all RAM above ram_top, which on a
+Raspberry Pi is the end of the first DRAM bank (about 1GB). EFI payloads
+get their memory from LMB, so iPXE and the Linux EFI stub on a Pi 5 with
+8GB had about 990MB, and Flatcar's 363MB initrd failed to load with
+EFI_OUT_OF_RESOURCES. bcm2712_mem_map also mapped only the first 1GB.
+
+On the BCM2712, map DRAM up to the top of the RAM the firmware reports
+below 4GB (at least the first 1GB, as before), enable LMB_ARCH_MEM_MAP
+with BCM2712 (the option has no prompt) and add a board
+lmb_arch_add_memory() that adds the DRAM banks and reserves only RAM
+above 4GB. The AXI bus and the PCIe inbound window to RP1 cover 64GB and
+the SD controller uses 32-bit SDMA, so every DMA master reaches that
+range. Boards with 1GB keep what they had; 2GB and 4GB boards give all of
+their RAM, 8GB and 16GB boards the first 4GB. Other SoCs keep the
+ram_top limit.
+---
+ arch/arm/mach-bcm283x/init.c | 50 ++++++++++++++++++++++++++++++++++--
+ board/raspberrypi/rpi/rpi.c  | 50 ++++++++++++++++++++++++++++++++++++
+ lib/Kconfig                  |  2 +-
+ 3 files changed, 99 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm/mach-bcm283x/init.c b/arch/arm/mach-bcm283x/init.c
+index 7a2faaa4de..e03976a0aa 100644
+--- a/arch/arm/mach-bcm283x/init.c
++++ b/arch/arm/mach-bcm283x/init.c
+@@ -11,6 +11,7 @@
+ #include <dm/device.h>
+ #include <fdt_support.h>
+ #include <asm/global_data.h>
++#include <linux/sizes.h>
+ 
+ #define BCM2711_RPI4_PCIE_XHCI_MMIO_PHYS	0x600000000UL
+ #define BCM2711_RPI4_PCIE_XHCI_MMIO_SIZE	0x400000UL
+@@ -69,10 +70,15 @@ static struct mm_region bcm2711_mem_map[MEM_MAP_MAX_ENTRIES] = {
+ 
+ static struct mm_region bcm2712_mem_map[MEM_MAP_MAX_ENTRIES] = {
+ 	{
+-		/* First 1GB of DRAM */
++		/*
++		 * DRAM below 4GB. LMB hands this range to EFI payloads
++		 * (lmb_arch_add_memory() in board/raspberrypi/rpi/rpi.c),
++		 * so it must be mapped, not only the first 1GB.
++		 * rpi_bcm2712_map_dram() trims the size to the RAM present.
++		 */
+ 		.virt = 0x00000000UL,
+ 		.phys = 0x00000000UL,
+-		.size = 0x40000000UL,
++		.size = 0x100000000UL,
+ 		.attrs = PTE_BLOCK_MEMTYPE(MT_NORMAL) |
+ 			 PTE_BLOCK_INNER_SHARE
+ 	}, {
+@@ -131,6 +137,44 @@ static void _rpi_update_mem_map(struct mm_region *pd)
+ 	}
+ }
+ 
++/*
++ * BCM2712: end the DRAM mapping at the top of the RAM the firmware reports
++ * below 4GB, so a board with less RAM gets no mapping for absent memory. It
++ * never ends below the first 1GB, which also holds the firmware's framebuffer
++ * above the first DRAM bank.
++ */
++static void rpi_bcm2712_map_dram(void)
++{
++	const void *blob = gd->fdt_blob;
++	int ac = fdt_address_cells(blob, 0);
++	int sc = fdt_size_cells(blob, 0);
++	u64 top = 0x40000000ULL;
++	int node = -1;
++
++	while ((node = fdt_node_offset_by_prop_value(blob, node, "device_type",
++						      "memory",
++						      sizeof("memory"))) >= 0) {
++		const fdt32_t *reg;
++		int len, i;
++
++		reg = fdt_getprop(blob, node, "reg", &len);
++		if (!reg)
++			continue;
++		for (i = 0; (i + ac + sc) * 4 <= len; i += ac + sc) {
++			u64 start = fdt_read_number(reg + i, ac);
++			u64 end = start + fdt_read_number(reg + i + ac, sc);
++
++			if (start >= SZ_4G)
++				continue;
++			if (end > SZ_4G)
++				end = SZ_4G;
++			if (end > top)
++				top = end;
++		}
++	}
++	mem_map[0].size = top;
++}
++
+ static void rpi_update_mem_map(void)
+ {
+ 	int ret;
+@@ -143,6 +187,8 @@ static void rpi_update_mem_map(void)
+ 		if (!ret) {
+ 			mm = (struct mm_region *)of_match->data;
+ 			_rpi_update_mem_map(mm);
++			if (mm == bcm2712_mem_map)
++				rpi_bcm2712_map_dram();
+ 			break;
+ 		}
+ 
+diff --git a/board/raspberrypi/rpi/rpi.c b/board/raspberrypi/rpi/rpi.c
+index 6c6618dce9..5025ea1537 100644
+--- a/board/raspberrypi/rpi/rpi.c
++++ b/board/raspberrypi/rpi/rpi.c
+@@ -12,6 +12,8 @@
+ #include <fdt_support.h>
+ #include <fdt_simplefb.h>
+ #include <init.h>
++#include <lmb.h>
++#include <log.h>
+ #include <memalign.h>
+ #include <mmc.h>
+ #include <asm/gpio.h>
+@@ -427,6 +429,54 @@ phys_addr_t board_get_usable_ram_top(phys_size_t total_size)
+ 	return fw_dtb_pointer & ~0xffff;
+ }
+ 
++#if CONFIG_IS_ENABLED(LMB_ARCH_MEM_MAP)
++static void rpi_lmb_reserve(phys_addr_t base, phys_size_t size)
++{
++	phys_addr_t addr = base;
++
++	if (lmb_alloc_mem(LMB_MEM_ALLOC_ADDR, 0, &addr, size, LMB_NOOVERWRITE))
++		log_err("Failed to reserve 0x%llx bytes at 0x%llx\n",
++			(unsigned long long)size, (unsigned long long)base);
++}
++
++/**
++ * lmb_arch_add_memory() - add DRAM to LMB with a limit per SoC
++ *
++ * The generic lmb_add_memory() reserves everything above ram_top, which on a
++ * Raspberry Pi is the end of the first DRAM bank (about 1GB), because DMA from
++ * some BCM2711 devices cannot reach further. LMB also serves the memory of EFI
++ * payloads, so iPXE and the Linux EFI stub had only that first 1GB, and a
++ * 363MB initrd (Flatcar) failed with EFI_OUT_OF_RESOURCES.
++ *
++ * On the BCM2712 (Raspberry Pi 5) the AXI bus and the PCIe inbound window to
++ * RP1 both cover 64GB, and the SD controller uses 32-bit SDMA, so RAM below
++ * 4GB is safe for every DMA master; bcm2712_mem_map maps it. Other SoCs keep
++ * the generic limit.
++ */
++void lmb_arch_add_memory(void)
++{
++	u64 limit = gd->ram_top ? gd->ram_top : SZ_4G;
++	phys_addr_t start;
++	phys_size_t size;
++	int i;
++
++	if (of_machine_is_compatible("brcm,bcm2712"))
++		limit = max_t(u64, limit, SZ_4G);
++
++	for (i = 0; i < CONFIG_NR_DRAM_BANKS; i++) {
++		start = gd->dram[i].start;
++		size = gd->dram[i].size;
++		if (!size)
++			continue;
++		lmb_add(start, size);
++		if (start >= limit)
++			rpi_lmb_reserve(start, size);
++		else if (start + size > limit)
++			rpi_lmb_reserve(limit, start + size - limit);
++	}
++}
++#endif
++
+ static void set_usbethaddr(void)
+ {
+ 	ALLOC_CACHE_ALIGN_BUFFER(struct msg_get_mac_address, msg, 1);
+diff --git a/lib/Kconfig b/lib/Kconfig
+index 4bb120c97c..5eb76f8616 100644
+--- a/lib/Kconfig
++++ b/lib/Kconfig
+@@ -1295,7 +1295,7 @@ config SPL_LMB
+ config LMB_ARCH_MEM_MAP
+ 	bool
+ 	depends on LMB
+-	default y if ARMADA_8K || FSL_LAYERSCAPE || X86
++	default y if ARMADA_8K || FSL_LAYERSCAPE || X86 || BCM2712
+ 	help
+ 	  Some architectures have special or unique aspects which need
+ 	  consideration when adding memory ranges to the list of available
+-- 
+2.56.0.windows.4
+

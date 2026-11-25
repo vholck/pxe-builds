@@ -1,0 +1,57 @@
+#!ipxe
+# First script every client of this stack runs (chained by the embedded autoexec.ipxe).
+#
+# 1. Per-device override: ipxe/hosts/<mac>.ipxe, MAC lower-case with hyphens,
+#    e.g. ipxe/hosts/02-00-00-00-00-02.ipxe. If that script fails, the default still runs.
+# 2. Matchbox, when MATCHBOX_ENABLED=1: ipxe/matchbox.ipxe (written by tftp-stage
+#    only then) asks Matchbox for this machine's profile. A machine no Matchbox
+#    group matches gets HTTP 404, and the stack default runs.
+# 3. Otherwise the stack default, IPXE_CHAIN_URI, which dnsmasq delivers as the
+#    ProxyDHCP boot filename. The embedded script hands it over in ${chain_target}
+#    (the DHCP server's own boot filename when there is no ProxyDHCP answer).
+
+# --autofree: under UEFI a finished script left loaded would end up in the
+# initrd of whatever boots next (see ipxe/fcos.ipxe). iPXE registers a script
+# again after it ran, also when it failed, so a host script that ends with an
+# error would otherwise sit in front of the initramfs of the Matchbox profile
+# or default that boots next (Pi 5: "VFS: Unable to mount root fs", 2026-11-22).
+chain --autofree tftp://${next-server}/ipxe/hosts/${netX/mac:hexhyp}.ipxe && exit ||
+chain --autofree tftp://${next-server}/ipxe/matchbox.ipxe && exit ||
+# A Matchbox profile that failed half-way (one of its initrds missing, for
+# example) leaves its kernel and initrds loaded; under UEFI they would be
+# handed to whatever boots next. This script is running and so not affected.
+imgfree ||
+
+# A failed chain of the default is tried again a few times before this script
+# gives up, because giving up means a reboot (IPXE_ON_FAILURE). Seen with
+# https://boot.netboot.xyz: now and then iPXE gets no address for the name
+# ("DNS name does not exist") although the name is fine.
+#
+# Each failure also asks this stack's TFTP server for ipxe/log/chain-failed-...,
+# a file that does not exist. The request shows up in the dnsmasq log with the
+# client's address, the attempt number and iPXE's error number, which is the only
+# trace a headless client leaves.
+#
+# Error 0x1 is not a failure: the chained script ended by itself with "exit 1".
+# netboot.xyz does that for "Boot from local hdd", which is also what its menu
+# picks after five minutes without a key. Then this script ends at once instead
+# of loading the menu five more times, and tells the embedded script through
+# ${chain_ended} to leave iPXE with a failure status, so the firmware goes on with
+# its boot order. The dnsmasq log shows a request for ipxe/log/chain-ended-leaving-ipxe.
+set try:int32 0
+:default
+chain --autofree ${chain_target} && exit ||
+set err ${errno}
+iseq ${err} 0x1 && goto leave ||
+inc try
+echo Chain of ${chain_target} failed (attempt ${try}, error ${err})
+imgfetch tftp://${next-server}/ipxe/log/chain-failed-attempt-${try}-error-${err} ||
+iseq ${try} 5 && exit 1 ||
+sleep 3
+goto default
+
+:leave
+echo ${chain_target} ended without booting anything; leaving iPXE
+imgfetch tftp://${next-server}/ipxe/log/chain-ended-leaving-ipxe ||
+set chain_ended 1
+exit 1

@@ -1,0 +1,111 @@
+name: Build RPi U-Boot stage image
+
+# Builds U-Boot for Pi 3, 4 and 5, fetches the Raspberry Pi firmware files, and
+# packages the resulting TFTP tree into the image the pxe stack's
+# rpi-uboot-stage service runs. The boot host only pulls the image.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - rpi-uboot-build/**
+      - dts/**
+      - build.env
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (branch, tag, or full commit SHA). Defaults to the branch selected above.'
+        required: false
+        default: ''
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/vholck/pxe-builds/rpi-uboot
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Resolve SHA
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build U-Boot for all models
+        run: |
+          set -eu
+          # Settings are read from build.env, never from workflow inputs.
+          set -a
+          . ./build.env
+          set +a
+          mkdir -p output
+          docker build --build-arg "RPI_DT_TAG=${RPI_DT_TAG}" --build-arg "RPI_DT_COMMIT=${RPI_DT_COMMIT}" \
+            --build-context dts=dts -t rpi-uboot-build rpi-uboot-build
+          # One container per model: each starts from pristine U-Boot sources.
+          for model in rpi3 rpi4 rpi5; do
+            docker run --rm \
+              -e MODEL="$model" \
+              -e SERIAL= \
+              -e FIRMWARE_VERSION="${FIRMWARE_VERSION}" \
+              -e UBOOT_PRE_DHCP_SLEEP="${UBOOT_PRE_DHCP_SLEEP}" \
+              -e UBOOT_LOCAL_BOOT_ORDER="${UBOOT_LOCAL_BOOT_ORDER}" \
+              -e UBOOT_RPI5_EFI_FDT="${UBOOT_RPI5_EFI_FDT:-firmware}" \
+              -e CONSOLE_MAIN="${CONSOLE_MAIN:-}" \
+              -e UBOOT_VERSION_SUFFIX="-pxe-$(git rev-parse --short=7 HEAD)" \
+              -e EFI_ARM64_RPI_FILE="${EFI_ARM64_RPI_FILE:-ipxe/snponly-arm64-rpi.efi}" \
+              -e PUID="$(id -u)" \
+              -e PGID="$(id -g)" \
+              -v "$PWD/output:/out" \
+              --entrypoint /bin/bash \
+              rpi-uboot-build /build.sh
+          done
+          ls -lR output/tftp
+          # Fail if any model is missing from the flat tree
+          for model in rpi3 rpi4 rpi5; do test -s "output/tftp/rpi/u-boot-$model.bin"; done
+          test -s output/tftp/config.txt
+          test -s output/tftp/rpi/overlays/README
+
+      - name: Build and push stage image
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+          TAG_LATEST: ${{ github.event_name == 'push' || inputs.ref == '' }}
+        run: |
+          set -eu
+          mkdir stage-context
+          cp -r output/tftp stage-context/tftp
+          cp rpi-uboot-build/stage.sh stage-context/stage.sh
+          docker build -f rpi-uboot-build/Dockerfile.stage -t "${IMAGE_NAME}:${SHA}" stage-context
+          docker push "${IMAGE_NAME}:${SHA}"
+          if [ "${TAG_LATEST}" = "true" ]; then
+            docker tag "${IMAGE_NAME}:${SHA}" "${IMAGE_NAME}:latest"
+            docker push "${IMAGE_NAME}:latest"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpi-uboot-tftp-${{ steps.sha.outputs.sha }}
+          path: output/tftp/
+          retention-days: 30
+
+      - name: Pin the image in the stacks repository
+        if: github.event_name == 'push' || inputs.ref == ''
+        uses: ./.github/actions/pin-in-stacks
+        with:
+          key: RPI_UBOOT_IMAGE_TAG
+          value: "${{ steps.sha.outputs.sha }}"
+          message: "chore(pxe): pin rpi-uboot image to ${{ steps.sha.outputs.sha }}"
+          token: ${{ secrets.STACKS_TOKEN }}

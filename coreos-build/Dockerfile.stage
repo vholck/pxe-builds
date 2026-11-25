@@ -1,0 +1,9 @@
+# Packages the assembled TFTP tree (assemble.sh) into the small image the pxe
+# stack's coreos-stage service runs. Built in CI by
+# .github/workflows/build-coreos.yml; the build context must contain tftp/.
+FROM alpine:3.24
+
+COPY tftp/ /assets/tftp/
+COPY stage.sh /stage.sh
+
+ENTRYPOINT ["/bin/sh", "/stage.sh"]

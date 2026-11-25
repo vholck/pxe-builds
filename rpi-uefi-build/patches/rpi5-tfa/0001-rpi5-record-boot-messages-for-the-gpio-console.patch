@@ -1,0 +1,164 @@
+diff --git a/plat/rpi/common/include/rpi_shared.h b/plat/rpi/common/include/rpi_shared.h
+index d22fc64..364b184 100644
+--- a/plat/rpi/common/include/rpi_shared.h
++++ b/plat/rpi/common/include/rpi_shared.h
+@@ -51,5 +51,6 @@ int plat_rpi_get_model(void);
+  ******************************************************************************/
+ 
+ void plat_rpi_bl31_custom_setup(void);
++void rpi5_early_log_init(void);
+ 
+ #endif /* RPI3_SHARED_H */
+diff --git a/plat/rpi/common/rpi4_bl31_setup.c b/plat/rpi/common/rpi4_bl31_setup.c
+index a7228fd..63c0df9 100644
+--- a/plat/rpi/common/rpi4_bl31_setup.c
++++ b/plat/rpi/common/rpi4_bl31_setup.c
+@@ -132,6 +132,11 @@ void bl31_early_platform_setup2(u_register_t arg0, u_register_t arg1,
+ 	/* Initialize the console to provide early debug support. */
+ 	rpi3_console_init();
+ 
++#ifdef RPI_EARLY_LOG_BASE
++	/* Also record the boot messages for the UEFI firmware to replay. */
++	rpi5_early_log_init();
++#endif
++
+ 	bl33_image_ep_info.pc = plat_get_ns_image_entrypoint();
+ 	bl33_image_ep_info.spsr = rpi3_get_spsr_for_bl33_entry();
+ 	SET_SECURITY_STATE(bl33_image_ep_info.h.attr, NON_SECURE);
+@@ -186,6 +191,12 @@ void bl31_plat_arch_setup(void)
+ 	 */
+ 	mmap_add_region(0, 0, 4096, MT_NON_CACHEABLE | MT_RW | MT_SECURE);
+ 
++#ifdef RPI_EARLY_LOG_BASE
++	/* The record of early console output. */
++	mmap_add_region(RPI_EARLY_LOG_BASE, RPI_EARLY_LOG_BASE,
++			RPI_EARLY_LOG_SIZE, MT_MEMORY | MT_RW | MT_NS);
++#endif
++
+ 	rpi3_setup_page_tables(BL31_BASE, BL31_END - BL31_BASE,
+ 			       BL_CODE_BASE, BL_CODE_END,
+ 			       BL_RO_DATA_BASE, BL_RO_DATA_END
+diff --git a/plat/rpi/rpi5/include/platform_def.h b/plat/rpi/rpi5/include/platform_def.h
+index a4c2f5b..f5c9e98 100644
+--- a/plat/rpi/rpi5/include/platform_def.h
++++ b/plat/rpi/rpi5/include/platform_def.h
+@@ -117,8 +117,15 @@
+ #define PLAT_PHY_ADDR_SPACE_SIZE	(ULL(1) << 40)
+ #define PLAT_VIRT_ADDR_SPACE_SIZE	(ULL(1) << 40)
+ 
+-#define MAX_MMAP_REGIONS		8
+-#define MAX_XLAT_TABLES			4
++#define MAX_MMAP_REGIONS		9
++#define MAX_XLAT_TABLES			6
++
++/*
++ * Record of early console output, shared with the UEFI firmware: the first
++ * 64 KiB of the system RAM, which that firmware reserves. See rpi5_setup.c.
++ */
++#define RPI_EARLY_LOG_BASE		ULL(0x400000)
++#define RPI_EARLY_LOG_SIZE		ULL(0x10000)
+ 
+ #define MAX_IO_DEVICES			U(3)
+ #define MAX_IO_HANDLES			U(4)
+diff --git a/plat/rpi/rpi5/rpi5_setup.c b/plat/rpi/rpi5/rpi5_setup.c
+index de82300..a1dad51 100644
+--- a/plat/rpi/rpi5/rpi5_setup.c
++++ b/plat/rpi/rpi5/rpi5_setup.c
+@@ -4,8 +4,97 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <stddef.h>
++#include <stdint.h>
++
++#include <arch_helpers.h>
++#include <drivers/console.h>
++#include <platform_def.h>
++
+ #include <rpi_shared.h>
+ 
++/*
++ * Record of early console output.
++ *
++ * The serial port on GPIO 14 and 15 of a Raspberry Pi 5 belongs to the RP1
++ * chip, which cannot be reached before the UEFI firmware has enumerated PCIe.
++ * What is printed before that is recorded in memory, and the UEFI firmware
++ * prints the record on that port when it has set it up. This is the same
++ * record the UEFI firmware's serial port library writes to; the layout is
++ * RPI5_EARLY_LOG in Rpi5EarlyLog.h of the Raspberry Pi 5 platform in
++ * edk2-platforms and must match it.
++ *
++ * BL31 runs first, so it starts the record. Only its boot messages are
++ * recorded: the console is not kept for the runtime.
++ *
++ * Every write is flushed from the data cache. The UEFI firmware starts with
++ * the MMU and the caches off and reads and extends the record in RAM; a
++ * header still sitting in the cache would later replace what it wrote there
++ * (seen: its first line was missing from the record).
++ */
++#define EARLY_LOG_MAGIC		U(0x474c3552)	/* "R5LG" */
++#define EARLY_LOG_STARTED_BY_TFA	U(0x31414654)	/* "TFA1" */
++
++struct rpi5_early_log {
++	uint32_t magic;
++	uint32_t used;
++	uint32_t dropped;
++	/*
++	 * EARLY_LOG_STARTED_BY_TFA tells the UEFI firmware that the record
++	 * was started in this boot. It clears the field when it has seen it.
++	 */
++	uint32_t started_by;
++	/* Set by the UEFI firmware when the port is up; nothing is recorded then. */
++	uint64_t gpio_uart_base;
++	char data[];
++};
++
++#define EARLY_LOG_CAPACITY	(RPI_EARLY_LOG_SIZE - \
++				 offsetof(struct rpi5_early_log, data))
++
++static int rpi5_early_log_putc(int c, console_t *console)
++{
++	struct rpi5_early_log *log = (struct rpi5_early_log *)console->base;
++
++	if (log->magic != EARLY_LOG_MAGIC || log->gpio_uart_base != 0U) {
++		return c;
++	}
++
++	if (log->used < EARLY_LOG_CAPACITY) {
++		log->data[log->used] = (char)c;
++		flush_dcache_range((uintptr_t)&log->data[log->used], 1U);
++		log->used++;
++	} else {
++		log->dropped++;
++	}
++
++	flush_dcache_range((uintptr_t)log, sizeof(*log));
++
++	return c;
++}
++
++static console_t rpi5_early_log_console = {
++	.flags = CONSOLE_FLAG_BOOT,
++	.putc = rpi5_early_log_putc,
++	.base = RPI_EARLY_LOG_BASE,
++};
++
++void rpi5_early_log_init(void)
++{
++	struct rpi5_early_log *log =
++		(struct rpi5_early_log *)rpi5_early_log_console.base;
++
++	/* RAM keeps its content over a reset: whatever is there is stale. */
++	log->gpio_uart_base = 0U;
++	log->used = 0U;
++	log->dropped = 0U;
++	log->started_by = EARLY_LOG_STARTED_BY_TFA;
++	log->magic = EARLY_LOG_MAGIC;
++	flush_dcache_range((uintptr_t)log, sizeof(*log));
++
++	(void)console_register(&rpi5_early_log_console);
++}
++
+ void plat_rpi_bl31_custom_setup(void)
+ {
+ 	/* Nothing to do here yet. */

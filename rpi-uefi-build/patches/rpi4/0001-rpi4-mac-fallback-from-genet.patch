@@ -1,0 +1,36 @@
+diff --git a/Platform/RaspberryPi/Drivers/RpiFirmwareDxe/RpiFirmwareDxe.c b/Platform/RaspberryPi/Drivers/RpiFirmwareDxe/RpiFirmwareDxe.c
+index 61798a053c..5e1a78cf23 100644
+--- a/Platform/RaspberryPi/Drivers/RpiFirmwareDxe/RpiFirmwareDxe.c
++++ b/Platform/RaspberryPi/Drivers/RpiFirmwareDxe/RpiFirmwareDxe.c
+@@ -504,6 +504,31 @@ RpiFirmwareGetMacAddress (
+   }
+ 
+   CopyMem (MacAddress, Cmd->TagBody.MacAddress, sizeof (Cmd->TagBody.MacAddress));
++
++#if (RPI_MODEL == 4)
++  //
++  // Fallback for boards whose mailbox returns an all-zero MAC address. The
++  // Raspberry Pi firmware has already programmed the real address into the
++  // GENET controller (UMAC_MAC0/UMAC_MAC1) for its own network boot, so read
++  // it back from there. 0xFD580000 is the fixed GENET base on the BCM2711.
++  //
++  if (IsZeroBuffer (MacAddress, 6)) {
++    UINT32  Mac0;
++    UINT32  Mac1;
++
++    Mac0 = MmioRead32 (0xFD580000 + 0x80C);
++    Mac1 = MmioRead32 (0xFD580000 + 0x810);
++    DEBUG ((DEBUG_WARN,
++      "%a: mailbox MAC is zero; using GENET registers %08x %08x\n",
++      __func__, Mac0, Mac1));
++    MacAddress[0] = (UINT8)(Mac0 >> 24);
++    MacAddress[1] = (UINT8)(Mac0 >> 16);
++    MacAddress[2] = (UINT8)(Mac0 >> 8);
++    MacAddress[3] = (UINT8)Mac0;
++    MacAddress[4] = (UINT8)(Mac1 >> 8);
++    MacAddress[5] = (UINT8)Mac1;
++  }
++#endif
+   ReleaseSpinLock (&mMailboxLock);
+ 
+   return EFI_SUCCESS;

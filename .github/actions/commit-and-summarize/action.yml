@@ -1,0 +1,65 @@
+name: Commit and summarize
+description: Commits staged changes, pushes, and writes a diff summary to the Actions step summary.
+
+inputs:
+  message:
+    description: Commit message
+    required: true
+  push-ref:
+    description: Remote ref to push to (e.g. HEAD:main). Defaults to HEAD.
+    required: false
+    default: HEAD
+  triggered-by:
+    description: SHA of the commit that triggered this workflow, for the summary footer.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Commit and summarize
+      shell: bash
+      env:
+        COMMIT_MSG: ${{ inputs.message }}
+        PUSH_REF: ${{ inputs.push-ref }}
+        TRIGGERED_BY: ${{ inputs.triggered-by }}
+        REPO: ${{ github.server_url }}/${{ github.repository }}
+      run: |
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        if git diff --cached --quiet; then
+          echo "No changes to commit"
+          exit 0
+        fi
+        git commit -m "$COMMIT_MSG"
+        # Other workflows also push bot commits to this branch. If the branch moved
+        # since checkout, rebase onto it and retry instead of failing the run.
+        TARGET="${PUSH_REF#*:}"
+        if [ "$TARGET" = "HEAD" ]; then
+          TARGET=$(git rev-parse --abbrev-ref HEAD)
+        fi
+        attempt=1
+        until git push origin "$PUSH_REF"; do
+          if [ "$attempt" -ge 4 ]; then
+            echo "::error::push to $TARGET still rejected after $attempt attempts"
+            exit 1
+          fi
+          attempt=$((attempt + 1))
+          sleep $((attempt * 3))
+          git pull --rebase origin "$TARGET"
+        done
+        BOT_SHA=$(git rev-parse HEAD)
+        {
+          echo "## $COMMIT_MSG"
+          echo ""
+          echo "| File | Diff |"
+          echo "|------|------|"
+          git diff HEAD~1 --name-only | while read -r f; do
+            ANCHOR=$(echo -n "$f" | md5sum | cut -d' ' -f1)
+            echo "| \`$f\` | [view diff]($REPO/commit/$BOT_SHA#diff-$ANCHOR) |"
+          done
+          if [ -n "$TRIGGERED_BY" ]; then
+            echo ""
+            echo "Triggered by: [$TRIGGERED_BY]($REPO/commit/$TRIGGERED_BY)"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"

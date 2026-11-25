@@ -1,0 +1,23 @@
+diff --git a/src/interface/efi/efi_snp.c b/src/interface/efi/efi_snp.c
+index dad8b33..be41c0d 100644
+--- a/src/interface/efi/efi_snp.c
++++ b/src/interface/efi/efi_snp.c
+@@ -786,8 +786,16 @@ efi_snp_receive ( EFI_SIMPLE_NETWORK_PROTOCOL *snp,
+ 	/* Raise TPL */
+ 	efi_raise_tpl ( &tpl );
+ 
+-	/* Poll the network device */
+-	efi_snp_poll ( snpdev );
++	/* Poll the network device, unless a packet is already queued.
++	 *
++	 * A poll can be expensive: a USB NIC reached through
++	 * EFI_USB_IO_PROTOCOL waits for a transfer timeout whenever
++	 * no packet is pending.  The caller polls through
++	 * GetStatus() anyway, so there is no need to poll again for
++	 * every packet it then collects.
++	 */
++	if ( list_empty ( &snpdev->rx ) )
++		efi_snp_poll ( snpdev );
+ 
+ 	/* Check for an available packet */
+ 	iobuf = list_first_entry ( &snpdev->rx, struct io_buffer, list );

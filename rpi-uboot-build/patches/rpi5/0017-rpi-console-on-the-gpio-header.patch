@@ -1,0 +1,149 @@
+Subject: [PATCH] rpi: console on the GPIO header of the Raspberry Pi 5
+
+U-Boot's console on a Pi 5 is the debug UART on the 3-pin connector; nothing
+is printed on GPIO 14 and 15, where the earlier models have their console.
+
+When the firmware's device tree names UART0 of the RP1 "serial0" and enables
+it (enable_uart=1 in config.txt), add a second console on that UART: bind a
+PL011 device at the RP1's UART0, connect GPIO 14 and 15 to it and append it
+to stdin, stdout and stderr. The RX pad gets its pull-up, so an open pin
+does not produce input. The device tree is left as it is.
+
+What U-Boot prints before the RP1 is initialised stays on the debug UART.
+---
+diff --git a/board/raspberrypi/rpi/rpi.c b/board/raspberrypi/rpi/rpi.c
+index 166901785a..dc3ba9956d 100644
+--- a/board/raspberrypi/rpi/rpi.c
++++ b/board/raspberrypi/rpi/rpi.c
+@@ -20,6 +20,10 @@
+ #include <asm/arch/sdhci.h>
+ #include <asm/global_data.h>
+ #include <dm/platform_data/serial_bcm283x_mu.h>
++#include <dm/platform_data/serial_pl01x.h>
++#include <dm/root.h>
++#include <asm/io.h>
++#include <pci.h>
+ #include <broadcom/bcm_board_types.h>
+ #ifdef CONFIG_ARM64
+ #include <asm/armv8/mmu.h>
+@@ -690,6 +694,111 @@ int ft_board_setup(void *blob, struct bd_info *bd)
+  * This initialization should be done only for RPI5 board.
+  */
+ #ifdef CONFIG_BCM2712
++/*
++ * Console on the GPIO header (GPIO 14 and 15, UART0 of the RP1).
++ *
++ * U-Boot's console on a Pi 5 is the debug UART on the 3-pin connector. When
++ * the firmware's device tree names the RP1's UART0 "serial0" and enables it,
++ * which is what enable_uart=1 in config.txt does, a second console is put on
++ * that UART, so the board can be used with the same serial cable as the
++ * earlier models. It is added to the console devices already in use. What
++ * U-Boot prints before the RP1 is up appears on the debug UART only.
++ *
++ * The device tree is not changed, so what is booted next sees no difference.
++ */
++#define RP1_CLOCKS_OFFSET	0x018000
++#define RP1_UART0_OFFSET	0x030000
++#define RP1_IO_BANK0_OFFSET	0x0d0000
++#define RP1_PADS_BANK0_OFFSET	0x0f0000
++#define RP1_CLK_UART_CTRL	0x54
++#define RP1_CLK_UART_DIV_INT	0x58
++#define RP1_CLK_CTRL_ENABLE	BIT(11)
++#define RP1_CLK_CTRL_AUXSRC	GENMASK(9, 5)
++#define RP1_CLK_UART_AUXSRC_XOSC (2 << 5)
++#define RP1_XOSC_HZ		50000000
++#define RP1_GPIO_CTRL(n)	((n) * 8 + 4)
++#define RP1_PAD(n)		((n) * 4 + 4)
++/* function a4 of GPIO 14 and 15 is UART0 TX and RX */
++#define RP1_FSEL_UART0		4
++/* pad: 4 mA drive, Schmitt trigger, input enabled, no pull */
++#define RP1_PAD_UART_TX		0x52
++/*
++ * pad: output driver off, input enabled, Schmitt trigger, pull-up. The
++ * pull-up keeps the line idle when nothing is connected; without it noise
++ * on the open pin would arrive as key presses and stop autoboot.
++ */
++#define RP1_PAD_UART_RX		0xda
++#define RP1_UART0_NAME		"rp1-uart0"
++
++static struct pl01x_serial_plat rp1_uart0_plat;
++
++static void rpi5_console_add(const char *var)
++{
++	const char *old = env_get(var);
++	char buf[80];
++
++	if (!old || strstr(old, RP1_UART0_NAME))
++		return;
++	snprintf(buf, sizeof(buf), "%s,%s", old, RP1_UART0_NAME);
++	env_set(var, buf);
++}
++
++static void rpi5_gpio_uart_console(struct udevice *rp1)
++{
++	void __iomem *base;
++	struct udevice *dev;
++	ofnode node;
++	u32 ctrl;
++	int err;
++
++	node = ofnode_get_aliases_node("serial0");
++	if (!ofnode_valid(node) || !ofnode_is_enabled(node) ||
++	    !ofnode_device_is_compatible(node, "arm,pl011-axi") ||
++	    !ofnode_equal(node, ofnode_get_aliases_node("uart0")))
++		return;
++
++	base = dm_pci_map_bar(rp1, PCI_BASE_ADDRESS_1, 0, 0,
++			      PCI_REGION_TYPE, PCI_REGION_MEM);
++	if (!base)
++		return;
++
++	/*
++	 * The RP1 starts with the UART clock running from its 50 MHz crystal.
++	 * Anything else is not handled here: leave the UART alone then.
++	 */
++	ctrl = readl(base + RP1_CLOCKS_OFFSET + RP1_CLK_UART_CTRL);
++	if ((ctrl & (RP1_CLK_CTRL_ENABLE | RP1_CLK_CTRL_AUXSRC)) !=
++	    (RP1_CLK_CTRL_ENABLE | RP1_CLK_UART_AUXSRC_XOSC) ||
++	    readl(base + RP1_CLOCKS_OFFSET + RP1_CLK_UART_DIV_INT) != 1) {
++		printf("RPI: unexpected RP1 UART clock setup (%08x), no console on GPIO 14/15\n",
++		       ctrl);
++		return;
++	}
++
++	rp1_uart0_plat.base = (unsigned long)base + RP1_UART0_OFFSET;
++	rp1_uart0_plat.type = TYPE_PL011;
++	rp1_uart0_plat.clock = RP1_XOSC_HZ;
++
++	err = device_bind(dm_root(), DM_DRIVER_GET(serial_pl01x),
++			  RP1_UART0_NAME, &rp1_uart0_plat, ofnode_null(), &dev);
++	if (!err)
++		err = device_probe(dev);
++	if (err) {
++		printf("RPI: no console on GPIO 14/15: %d\n", err);
++		return;
++	}
++
++	/* The UART is running and its TX output idle: connect the pins. */
++	writel(RP1_PAD_UART_RX, base + RP1_PADS_BANK0_OFFSET + RP1_PAD(15));
++	writel(RP1_PAD_UART_TX, base + RP1_PADS_BANK0_OFFSET + RP1_PAD(14));
++	writel(RP1_FSEL_UART0, base + RP1_IO_BANK0_OFFSET + RP1_GPIO_CTRL(15));
++	writel(RP1_FSEL_UART0, base + RP1_IO_BANK0_OFFSET + RP1_GPIO_CTRL(14));
++
++	rpi5_console_add("stdin");
++	rpi5_console_add("stdout");
++	rpi5_console_add("stderr");
++}
++
+ int board_late_init(void)
+ {
+ 	struct udevice *dev;
+@@ -724,6 +833,8 @@ int board_late_init(void)
+ 
+ 	printf("RPI: RP1 initialized successfully\n");
+ 
++	rpi5_gpio_uart_console(dev);
++
+ 	return 0;
+ }
+ #endif

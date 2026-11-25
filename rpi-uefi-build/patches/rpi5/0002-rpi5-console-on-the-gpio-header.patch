@@ -1,0 +1,776 @@
+diff --git a/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBm.c b/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBm.c
+index 20afbd5..19b0e11 100644
+--- a/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBm.c
++++ b/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBm.c
+@@ -26,6 +26,8 @@
+ #include <Protocol/EsrtManagement.h>
+ #include <Protocol/GraphicsOutput.h>
+ #include <Protocol/LoadedImage.h>
++#include <Protocol/PciIo.h>
++#include <IndustryStandard/Pci.h>
+ #include <Protocol/PlatformSpecificResetHandler.h>
+ #include <Guid/BootDiscoveryPolicy.h>
+ #include <Guid/EventGroup.h>
+@@ -67,6 +69,14 @@ typedef struct {
+ #define SERIAL_DXE_FILE_GUID      \
+   { 0xD3987D4B, 0x971A, 0x435F, { 0x8C, 0xAF, 0x49, 0x67, 0xEB, 0x62, 0x72, 0x41 } }
+ 
++//
++// Rp1UartDxe: the serial port on GPIO 14/15 of a Pi 5. On a board or with a
++// configuration without it, its console device path matches no device and
++// is skipped.
++//
++#define RP1_UART_DXE_FILE_GUID    \
++  { 0xda3a19aa, 0xfb9d, 0x466f, { 0x90, 0x41, 0xd1, 0xcb, 0xb8, 0xf1, 0x9e, 0x9f } }
++
+ STATIC PLATFORM_SD_DEV mArasan = {
+   //
+   // VENDOR_DEVICE_PATH ArasanMMCHostDxe
+@@ -146,6 +156,49 @@ STATIC PLATFORM_SERIAL_CONSOLE mSerialConsole = {
+   }
+ };
+ 
++STATIC PLATFORM_SERIAL_CONSOLE mGpioSerialConsole = {
++  //
++  // VENDOR_DEVICE_PATH Rp1UartDxe
++  //
++  {
++    { HARDWARE_DEVICE_PATH, HW_VENDOR_DP, DP_NODE_LEN (VENDOR_DEVICE_PATH) },
++    RP1_UART_DXE_FILE_GUID
++  },
++
++  //
++  // UART_DEVICE_PATH Uart
++  //
++  {
++    { MESSAGING_DEVICE_PATH, MSG_UART_DP, DP_NODE_LEN (UART_DEVICE_PATH) },
++    0,                                      // Reserved
++    FixedPcdGet64 (PcdUartDefaultBaudRate), // BaudRate
++    FixedPcdGet8 (PcdUartDefaultDataBits),  // DataBits
++    FixedPcdGet8 (PcdUartDefaultParity),    // Parity
++    FixedPcdGet8 (PcdUartDefaultStopBits)   // StopBits
++  },
++
++  //
++  // VENDOR_DEFINED_DEVICE_PATH TermType
++  //
++  {
++    {
++      MESSAGING_DEVICE_PATH, MSG_VENDOR_DP,
++      DP_NODE_LEN (VENDOR_DEFINED_DEVICE_PATH)
++    }
++    //
++    // Guid to be filled in dynamically
++    //
++  },
++
++  //
++  // EFI_DEVICE_PATH_PROTOCOL End
++  //
++  {
++    END_DEVICE_PATH_TYPE, END_ENTIRE_DEVICE_PATH_SUBTYPE,
++    DP_NODE_LEN (EFI_DEVICE_PATH_PROTOCOL)
++  }
++};
++
+ 
+ #pragma pack (1)
+ typedef struct {
+@@ -180,6 +233,7 @@ STATIC PLATFORM_USB_KEYBOARD mUsbKeyboard = {
+ };
+ 
+ STATIC EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *mSerialConProtocol;
++STATIC EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *mGpioSerialConProtocol;
+ 
+ /**
+   Check if the handle satisfies a particular condition.
+@@ -343,6 +397,36 @@ Connect (
+     __func__, ReportText, Status));
+ }
+ 
++//
++// PCI vendor and device ID of the RP1 chip of a Pi 5
++//
++#define RP1_PCI_ID  0x00011de4
++
++/**
++  This FILTER_FUNCTION tells whether a PCI device is the RP1 chip.
++**/
++STATIC
++BOOLEAN
++EFIAPI
++IsRp1 (
++  IN EFI_HANDLE   Handle,
++  IN CONST CHAR16 *ReportText
++  )
++{
++  EFI_STATUS          Status;
++  EFI_PCI_IO_PROTOCOL *PciIo;
++  UINT32              PciId;
++
++  Status = gBS->HandleProtocol (Handle, &gEfiPciIoProtocolGuid, (VOID**)&PciIo);
++  if (EFI_ERROR (Status)) {
++    return FALSE;
++  }
++
++  Status = PciIo->Pci.Read (PciIo, EfiPciIoWidthUint32, PCI_VENDOR_ID_OFFSET, 1, &PciId);
++
++  return !EFI_ERROR (Status) && PciId == RP1_PCI_ID;
++}
++
+ STATIC
+ INTN
+ PlatformRegisterBootOption (
+@@ -527,6 +611,9 @@ SerialConPrint (
+   if (mSerialConProtocol != NULL) {
+     mSerialConProtocol->OutputString (mSerialConProtocol, Text);
+   }
++  if (mGpioSerialConProtocol != NULL) {
++    mGpioSerialConProtocol->OutputString (mGpioSerialConProtocol, Text);
++  }
+ }
+ 
+ /**
+@@ -645,6 +732,15 @@ PlatformBootManagerBeforeConsole (
+   EfiBootManagerUpdateConsoleVariable (ConOut, (EFI_DEVICE_PATH_PROTOCOL*)&mSerialConsole, NULL);
+   EfiBootManagerUpdateConsoleVariable (ErrOut, (EFI_DEVICE_PATH_PROTOCOL*)&mSerialConsole, NULL);
+ 
++  //
++  // The same for the serial port on GPIO 14/15 of a Pi 5.
++  //
++  CopyGuid (&mGpioSerialConsole.TermType.Guid, &gEfiTtyTermGuid);
++
++  EfiBootManagerUpdateConsoleVariable (ConIn, (EFI_DEVICE_PATH_PROTOCOL*)&mGpioSerialConsole, NULL);
++  EfiBootManagerUpdateConsoleVariable (ConOut, (EFI_DEVICE_PATH_PROTOCOL*)&mGpioSerialConsole, NULL);
++  EfiBootManagerUpdateConsoleVariable (ErrOut, (EFI_DEVICE_PATH_PROTOCOL*)&mGpioSerialConsole, NULL);
++
+   Status = gBS->LocateProtocol (
+                   &gEdkiiPlatformSpecificResetHandlerProtocolGuid,
+                   NULL,
+@@ -675,6 +771,14 @@ PlatformBootManagerBeforeConsole (
+   // that the xHCI PCI controller gets enumerated (Pi 4) or by connecting
+   // to the DesignWare USB OTG controller directly.
+   FilterAndProcess (&gEfiPciRootBridgeIoProtocolGuid, NULL, Connect);
++
++  //
++  // On a Pi 5 the serial port on GPIO 14/15 belongs to the RP1 chip, a PCI
++  // device. Start its bus driver now: the port has to exist when the
++  // consoles are connected, right after this function. A terminal that
++  // appears later is not made a console any more.
++  //
++  FilterAndProcess (&gEfiPciIoProtocolGuid, IsRp1, Connect);
+   FilterAndProcess (&gEfiUsb2HcProtocolGuid, NULL, Connect);
+ }
+ 
+@@ -809,6 +913,11 @@ PlatformBootManagerAfterConsole (
+     gBS->HandleProtocol (SerialHandle, &gEfiSimpleTextOutProtocolGuid, (VOID**)&mSerialConProtocol);
+   }
+ 
++  Status = EfiBootManagerConnectDevicePath ((EFI_DEVICE_PATH_PROTOCOL*)&mGpioSerialConsole, &SerialHandle);
++  if (Status == EFI_SUCCESS) {
++    gBS->HandleProtocol (SerialHandle, &gEfiSimpleTextOutProtocolGuid, (VOID**)&mGpioSerialConProtocol);
++  }
++
+   //
+   // Show the splash screen.
+   //
+diff --git a/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf b/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+index 57280db..d1fb542 100644
+--- a/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
++++ b/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBootManagerLib.inf
+@@ -85,6 +85,7 @@
+   gEfiGraphicsOutputProtocolGuid
+   gEfiLoadedImageProtocolGuid
+   gEfiPciRootBridgeIoProtocolGuid
++  gEfiPciIoProtocolGuid
+   gEfiSimpleFileSystemProtocolGuid
+   gEsrtManagementProtocolGuid
+   gEfiUsb2HcProtocolGuid
+diff --git a/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.c b/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.c
+new file mode 100644
+index 0000000..6419d28
+--- /dev/null
++++ b/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.c
+@@ -0,0 +1,499 @@
++/** @file
++  Serial console on the GPIO header of the Raspberry Pi 5.
++
++  GPIO 14 and 15 of the 40-pin header, where the earlier models have their
++  console, belong to UART0 of the RP1 chip on a Pi 5. The RP1 sits behind
++  PCIe, so the firmware's own serial port (SerialPortLib, SerialDxe) cannot
++  be there: that one has to work from the first instruction, and it is the
++  debug UART on the 3-pin connector.
++
++  This driver adds UART0 of the RP1 as a second serial port. It waits for the
++  RP1 bus driver, sets the UART up, connects the two pins to it and installs
++  the Serial I/O protocol with a device path of its own. The boot manager
++  library lists that path in the console variables, so the terminal driver
++  puts a console on it next to the one on the debug UART.
++
++  The pins are taken only when the device tree handed over by the Raspberry Pi
++  firmware names this UART "serial0" and enables it, which is what
++  enable_uart=1 in config.txt does. Without that setting the pins are left
++  alone, free for a HAT.
++
++  Output starts when PCIe has been enumerated. What the firmware prints
++  before that appears on the debug UART only.
++
++  SPDX-License-Identifier: BSD-2-Clause-Patent
++**/
++
++#include <Uefi.h>
++#include <Library/BaseMemoryLib.h>
++#include <Library/DebugLib.h>
++#include <Library/FdtLib.h>
++#include <Library/IoLib.h>
++#include <Library/PcdLib.h>
++#include <Library/PL011UartLib.h>
++#include <Library/UefiBootServicesTableLib.h>
++#include <Library/UefiLib.h>
++#include <Protocol/DevicePath.h>
++#include <Protocol/Rp1Bus.h>
++#include <Protocol/SerialIo.h>
++#include <Rp1.h>
++
++//
++// The same value as FILE_GUID in Rp1UartDxe.inf and as RP1_UART_DXE_FILE_GUID
++// in PlatformBootManagerLib, which builds the console device path from it.
++//
++#define RP1_UART_DXE_FILE_GUID  \
++  { 0xda3a19aa, 0xfb9d, 0x466f, { 0x90, 0x41, 0xd1, 0xcb, 0xb8, 0xf1, 0x9e, 0x9f } }
++
++//
++// Clock generator: the UART clock
++//
++#define RP1_CLK_UART_CTRL         0x54
++#define RP1_CLK_UART_DIV_INT      0x58
++#define RP1_CLK_CTRL_ENABLE       BIT11
++#define RP1_CLK_CTRL_AUXSRC_MASK  (0x1f << 5)
++#define RP1_CLK_UART_AUXSRC_XOSC  (2 << 5)
++#define RP1_XOSC_HZ               50000000
++
++//
++// Pins
++//
++#define RP1_GPIO_CTRL(Pin)  ((Pin) * 8 + 4)
++#define RP1_PAD(Pin)        ((Pin) * 4 + 4)
++#define RP1_GPIO_UART0_TX   14
++#define RP1_GPIO_UART0_RX   15
++// Function a4 of GPIO 14 and 15 is UART0 TX and RX
++#define RP1_FSEL_UART0  4
++// Pad: 4 mA drive, Schmitt trigger, input enabled, no pull
++#define RP1_PAD_UART_TX  0x52
++//
++// Pad: output driver off, input enabled, Schmitt trigger, pull-up. The
++// pull-up keeps the line idle when nothing is connected; without it noise on
++// the open pin would arrive as key presses.
++//
++#define RP1_PAD_UART_RX  0xda
++
++//
++// PL011 registers used here directly
++//
++#define PL011_UARTDR         0x00
++#define PL011_UARTECR        0x04
++#define PL011_UARTDR_ERRORS  0xf00
++
++#define SERIAL_DEFAULT_TIMEOUT  (1000 * 1000)
++
++#pragma pack (1)
++typedef struct {
++  VENDOR_DEVICE_PATH          Guid;
++  UART_DEVICE_PATH            Uart;
++  EFI_DEVICE_PATH_PROTOCOL    End;
++} RP1_UART_DEVICE_PATH;
++#pragma pack ()
++
++STATIC UINTN       mUartBase;
++STATIC EFI_HANDLE  mSerialHandle;
++STATIC VOID        *mRp1BusRegistration;
++
++STATIC RP1_UART_DEVICE_PATH  mSerialDevicePath = {
++  {
++    { HARDWARE_DEVICE_PATH,  HW_VENDOR_DP,                   { sizeof (VENDOR_DEVICE_PATH),       0 }
++    },
++    RP1_UART_DXE_FILE_GUID
++  },
++  {
++    { MESSAGING_DEVICE_PATH, MSG_UART_DP,                    { sizeof (UART_DEVICE_PATH),         0 }
++    },
++    0,                  // Reserved
++    0,                  // BaudRate
++    0,                  // DataBits
++    0,                  // Parity
++    0                   // StopBits
++  },
++  { END_DEVICE_PATH_TYPE,  END_ENTIRE_DEVICE_PATH_SUBTYPE, { sizeof (EFI_DEVICE_PATH_PROTOCOL), 0 }
++  }
++};
++
++STATIC EFI_SERIAL_IO_MODE  mSerialIoMode = {
++  //
++  // ControlMask: what GetControl() can report
++  //
++  EFI_SERIAL_CLEAR_TO_SEND | EFI_SERIAL_DATA_SET_READY | EFI_SERIAL_RING_INDICATE |
++  EFI_SERIAL_CARRIER_DETECT | EFI_SERIAL_REQUEST_TO_SEND | EFI_SERIAL_DATA_TERMINAL_READY |
++  EFI_SERIAL_INPUT_BUFFER_EMPTY | EFI_SERIAL_OUTPUT_BUFFER_EMPTY |
++  EFI_SERIAL_HARDWARE_LOOPBACK_ENABLE | EFI_SERIAL_HARDWARE_FLOW_CONTROL_ENABLE,
++  SERIAL_DEFAULT_TIMEOUT, // Timeout
++  0,                      // BaudRate
++  1,                      // ReceiveFifoDepth
++  0,                      // DataBits
++  0,                      // Parity
++  0                       // StopBits
++};
++
++/**
++  Set the baud rate, receive FIFO depth, time out, parity, data bits and stop
++  bits of the UART. A value of 0 (DefaultParity, DefaultStopBits) selects the
++  default of that setting.
++**/
++STATIC
++EFI_STATUS
++EFIAPI
++Rp1UartSetAttributes (
++  IN EFI_SERIAL_IO_PROTOCOL  *This,
++  IN UINT64                  BaudRate,
++  IN UINT32                  ReceiveFifoDepth,
++  IN UINT32                  Timeout,
++  IN EFI_PARITY_TYPE         Parity,
++  IN UINT8                   DataBits,
++  IN EFI_STOP_BITS_TYPE      StopBits
++  )
++{
++  RETURN_STATUS  Status;
++  EFI_STATUS     EfiStatus;
++  EFI_TPL        Tpl;
++
++  if (BaudRate == 0) {
++    BaudRate = PcdGet64 (PcdUartDefaultBaudRate);
++  }
++
++  if (Timeout == 0) {
++    Timeout = SERIAL_DEFAULT_TIMEOUT;
++  }
++
++  Status = PL011UartInitializePort (
++             mUartBase,
++             RP1_XOSC_HZ,
++             &BaudRate,
++             &ReceiveFifoDepth,
++             &Parity,
++             &DataBits,
++             &StopBits
++             );
++  if (RETURN_ERROR (Status)) {
++    return EFI_INVALID_PARAMETER;
++  }
++
++  Tpl = gBS->RaiseTPL (TPL_NOTIFY);
++
++  This->Mode->BaudRate         = BaudRate;
++  This->Mode->ReceiveFifoDepth = ReceiveFifoDepth;
++  This->Mode->Timeout          = Timeout;
++  This->Mode->Parity           = (UINT32)Parity;
++  This->Mode->DataBits         = (UINT32)DataBits;
++  This->Mode->StopBits         = (UINT32)StopBits;
++
++  EfiStatus = EFI_SUCCESS;
++  if ((mSerialDevicePath.Uart.BaudRate != BaudRate) ||
++      (mSerialDevicePath.Uart.DataBits != DataBits) ||
++      (mSerialDevicePath.Uart.Parity   != (UINT8)Parity) ||
++      (mSerialDevicePath.Uart.StopBits != (UINT8)StopBits))
++  {
++    //
++    // The device path names the line settings: keep it in step.
++    //
++    mSerialDevicePath.Uart.BaudRate = BaudRate;
++    mSerialDevicePath.Uart.DataBits = DataBits;
++    mSerialDevicePath.Uart.Parity   = (UINT8)Parity;
++    mSerialDevicePath.Uart.StopBits = (UINT8)StopBits;
++
++    if (mSerialHandle != NULL) {
++      EfiStatus = gBS->ReinstallProtocolInterface (
++                         mSerialHandle,
++                         &gEfiDevicePathProtocolGuid,
++                         &mSerialDevicePath,
++                         &mSerialDevicePath
++                         );
++    }
++  }
++
++  gBS->RestoreTPL (Tpl);
++
++  return EfiStatus;
++}
++
++/**
++  Reset the UART: program the current settings again.
++**/
++STATIC
++EFI_STATUS
++EFIAPI
++Rp1UartReset (
++  IN EFI_SERIAL_IO_PROTOCOL  *This
++  )
++{
++  return This->SetAttributes (
++                 This,
++                 This->Mode->BaudRate,
++                 This->Mode->ReceiveFifoDepth,
++                 This->Mode->Timeout,
++                 (EFI_PARITY_TYPE)This->Mode->Parity,
++                 (UINT8)This->Mode->DataBits,
++                 (EFI_STOP_BITS_TYPE)This->Mode->StopBits
++                 );
++}
++
++STATIC
++EFI_STATUS
++EFIAPI
++Rp1UartSetControl (
++  IN EFI_SERIAL_IO_PROTOCOL  *This,
++  IN UINT32                  Control
++  )
++{
++  return PL011UartSetControl (mUartBase, Control);
++}
++
++STATIC
++EFI_STATUS
++EFIAPI
++Rp1UartGetControl (
++  IN EFI_SERIAL_IO_PROTOCOL  *This,
++  OUT UINT32                 *Control
++  )
++{
++  return PL011UartGetControl (mUartBase, Control);
++}
++
++STATIC
++EFI_STATUS
++EFIAPI
++Rp1UartWrite (
++  IN EFI_SERIAL_IO_PROTOCOL  *This,
++  IN OUT UINTN               *BufferSize,
++  IN VOID                    *Buffer
++  )
++{
++  UINTN  Count;
++
++  Count = PL011UartWrite (mUartBase, Buffer, *BufferSize);
++  if (Count != *BufferSize) {
++    *BufferSize = Count;
++    return EFI_TIMEOUT;
++  }
++
++  return EFI_SUCCESS;
++}
++
++/**
++  Read from the UART. Gives up when no character arrives within the time out
++  of the current mode.
++
++  A character received with an error flag (break, framing, parity, overrun)
++  is dropped: the line going low at a reset or with a cable being plugged in
++  arrives as a break, and must not be taken for a key press.
++**/
++STATIC
++EFI_STATUS
++EFIAPI
++Rp1UartRead (
++  IN EFI_SERIAL_IO_PROTOCOL  *This,
++  IN OUT UINTN               *BufferSize,
++  OUT VOID                   *Buffer
++  )
++{
++  UINT8   *Bytes;
++  UINTN   Count;
++  UINTN   Waited;
++  UINT32  Data;
++
++  Bytes  = Buffer;
++  Count  = 0;
++  Waited = 0;
++
++  while (Count < *BufferSize) {
++    if (!PL011UartPoll (mUartBase)) {
++      if (Waited >= This->Mode->Timeout) {
++        break;
++      }
++
++      gBS->Stall (10);
++      Waited += 10;
++      continue;
++    }
++
++    Data = MmioRead32 (mUartBase + PL011_UARTDR);
++    if ((Data & PL011_UARTDR_ERRORS) != 0) {
++      MmioWrite32 (mUartBase + PL011_UARTECR, 0);
++      continue;
++    }
++
++    Bytes[Count++] = (UINT8)Data;
++    Waited         = 0;
++  }
++
++  if (Count != *BufferSize) {
++    *BufferSize = Count;
++    return EFI_TIMEOUT;
++  }
++
++  return EFI_SUCCESS;
++}
++
++STATIC EFI_SERIAL_IO_PROTOCOL  mSerialIo = {
++  SERIAL_IO_INTERFACE_REVISION,
++  Rp1UartReset,
++  Rp1UartSetAttributes,
++  Rp1UartSetControl,
++  Rp1UartGetControl,
++  Rp1UartWrite,
++  Rp1UartRead,
++  &mSerialIoMode
++};
++
++/**
++  Tell whether the device tree of the Raspberry Pi firmware names UART0 of
++  the RP1 "serial0" and enables it.
++**/
++STATIC
++BOOLEAN
++GpioUartIsSerial0 (
++  VOID
++  )
++{
++  CONST VOID   *Fdt;
++  INT32        Aliases;
++  INT32        Node;
++  INT32        Serial0Size;
++  INT32        Uart0Size;
++  INT32        StatusSize;
++  CONST CHAR8  *Serial0;
++  CONST CHAR8  *Uart0;
++  CONST CHAR8  *Status;
++
++  Fdt = (CONST VOID *)(UINTN)FixedPcdGet32 (PcdFdtBaseAddress);
++  if (FdtCheckHeader (Fdt) != 0) {
++    return FALSE;
++  }
++
++  Aliases = FdtPathOffset (Fdt, "/aliases");
++  if (Aliases < 0) {
++    return FALSE;
++  }
++
++  Serial0 = FdtGetProp (Fdt, Aliases, "serial0", &Serial0Size);
++  Uart0   = FdtGetProp (Fdt, Aliases, "uart0", &Uart0Size);
++  if ((Serial0 == NULL) || (Uart0 == NULL) ||
++      (Serial0Size < 2) || (Serial0Size != Uart0Size) ||
++      (Serial0[Serial0Size - 1] != '\0') ||
++      (CompareMem (Serial0, Uart0, Serial0Size) != 0))
++  {
++    return FALSE;
++  }
++
++  Node = FdtPathOffset (Fdt, Serial0);
++  if (Node < 0) {
++    return FALSE;
++  }
++
++  Status = FdtGetProp (Fdt, Node, "status", &StatusSize);
++  if (Status == NULL) {
++    // No status property: enabled
++    return TRUE;
++  }
++
++  return ((StatusSize == sizeof ("okay")) && (CompareMem (Status, "okay", sizeof ("okay")) == 0)) ||
++         ((StatusSize == sizeof ("ok")) && (CompareMem (Status, "ok", sizeof ("ok")) == 0));
++}
++
++/**
++  Runs when the RP1 bus driver has found the chip: set up UART0, connect
++  GPIO 14 and 15 to it and publish it as a serial port.
++**/
++STATIC
++VOID
++EFIAPI
++Rp1BusNotify (
++  IN EFI_EVENT  Event,
++  IN VOID       *Context
++  )
++{
++  EFI_STATUS            Status;
++  RP1_BUS_PROTOCOL      *Rp1Bus;
++  EFI_PHYSICAL_ADDRESS  Base;
++  UINT32                ClockCtrl;
++
++  Status = gBS->LocateProtocol (
++                  &gRp1BusProtocolGuid,
++                  mRp1BusRegistration,
++                  (VOID **)&Rp1Bus
++                  );
++  if (EFI_ERROR (Status) || (mSerialHandle != NULL)) {
++    return;
++  }
++
++  if (!GpioUartIsSerial0 ()) {
++    DEBUG ((DEBUG_INFO, "%a: UART0 is not serial0 (enable_uart=1 not set), GPIO 14/15 left alone\n", __func__));
++    return;
++  }
++
++  Base = Rp1Bus->GetPeripheralBase (Rp1Bus);
++
++  //
++  // The RP1 starts with the UART clock running from its 50 MHz crystal.
++  // Anything else is not handled here: leave the UART alone then.
++  //
++  ClockCtrl = MmioRead32 (Base + RP1_CLOCKS_MAIN_BASE + RP1_CLK_UART_CTRL);
++  if (((ClockCtrl & (RP1_CLK_CTRL_ENABLE | RP1_CLK_CTRL_AUXSRC_MASK)) !=
++       (RP1_CLK_CTRL_ENABLE | RP1_CLK_UART_AUXSRC_XOSC)) ||
++      (MmioRead32 (Base + RP1_CLOCKS_MAIN_BASE + RP1_CLK_UART_DIV_INT) != 1))
++  {
++    DEBUG ((
++      DEBUG_ERROR,
++      "%a: unexpected RP1 UART clock setup (%08x), no console on GPIO 14/15\n",
++      __func__,
++      ClockCtrl
++      ));
++    return;
++  }
++
++  mUartBase = (UINTN)(Base + RP1_UART0_BASE);
++
++  mSerialIoMode.BaudRate = PcdGet64 (PcdUartDefaultBaudRate);
++  mSerialIoMode.DataBits = (UINT32)PcdGet8 (PcdUartDefaultDataBits);
++  mSerialIoMode.Parity   = (UINT32)PcdGet8 (PcdUartDefaultParity);
++  mSerialIoMode.StopBits = (UINT32)PcdGet8 (PcdUartDefaultStopBits);
++
++  Status = mSerialIo.Reset (&mSerialIo);
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, "%a: failed to set up RP1 UART0. Status=%r\n", __func__, Status));
++    return;
++  }
++
++  //
++  // The UART is running and its TX output idle: connect the pins.
++  //
++  MmioWrite32 (Base + RP1_PADS_BANK0_BASE + RP1_PAD (RP1_GPIO_UART0_RX), RP1_PAD_UART_RX);
++  MmioWrite32 (Base + RP1_PADS_BANK0_BASE + RP1_PAD (RP1_GPIO_UART0_TX), RP1_PAD_UART_TX);
++  MmioWrite32 (Base + RP1_IO_BANK0_BASE + RP1_GPIO_CTRL (RP1_GPIO_UART0_RX), RP1_FSEL_UART0);
++  MmioWrite32 (Base + RP1_IO_BANK0_BASE + RP1_GPIO_CTRL (RP1_GPIO_UART0_TX), RP1_FSEL_UART0);
++
++  Status = gBS->InstallMultipleProtocolInterfaces (
++                  &mSerialHandle,
++                  &gEfiSerialIoProtocolGuid,
++                  &mSerialIo,
++                  &gEfiDevicePathProtocolGuid,
++                  &mSerialDevicePath,
++                  NULL
++                  );
++  if (EFI_ERROR (Status)) {
++    mSerialHandle = NULL;
++    DEBUG ((DEBUG_ERROR, "%a: failed to install the serial port. Status=%r\n", __func__, Status));
++  }
++}
++
++EFI_STATUS
++EFIAPI
++Rp1UartDxeEntryPoint (
++  IN EFI_HANDLE        ImageHandle,
++  IN EFI_SYSTEM_TABLE  *SystemTable
++  )
++{
++  EfiCreateProtocolNotifyEvent (
++    &gRp1BusProtocolGuid,
++    TPL_CALLBACK,
++    Rp1BusNotify,
++    NULL,
++    &mRp1BusRegistration
++    );
++
++  return EFI_SUCCESS;
++}
+diff --git a/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.inf b/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.inf
+new file mode 100644
+index 0000000..7500a5f
+--- /dev/null
++++ b/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.inf
+@@ -0,0 +1,52 @@
++## @file
++#  Serial console on the GPIO header of the Raspberry Pi 5 (GPIO 14 and 15,
++#  UART0 of the RP1).
++#
++#  SPDX-License-Identifier: BSD-2-Clause-Patent
++##
++
++[Defines]
++  INF_VERSION                    = 0x0001001A
++  BASE_NAME                      = Rp1UartDxe
++  FILE_GUID                      = da3a19aa-fb9d-466f-9041-d1cbb8f19e9f
++  MODULE_TYPE                    = DXE_DRIVER
++  VERSION_STRING                 = 1.0
++  ENTRY_POINT                    = Rp1UartDxeEntryPoint
++
++[Sources]
++  Rp1UartDxe.c
++
++[Packages]
++  ArmPlatformPkg/ArmPlatformPkg.dec
++  MdePkg/MdePkg.dec
++  MdeModulePkg/MdeModulePkg.dec
++  Platform/RaspberryPi/RaspberryPi.dec
++  Silicon/RaspberryPi/RpiSiliconPkg/RpiSiliconPkg.dec
++
++[LibraryClasses]
++  BaseMemoryLib
++  DebugLib
++  FdtLib
++  IoLib
++  PcdLib
++  PL011UartLib
++  UefiBootServicesTableLib
++  UefiDriverEntryPoint
++  UefiLib
++
++[Protocols]
++  gRp1BusProtocolGuid                           ## CONSUMES
++  gEfiSerialIoProtocolGuid                      ## PRODUCES
++  gEfiDevicePathProtocolGuid                    ## PRODUCES
++
++[FixedPcd]
++  gRaspberryPiTokenSpaceGuid.PcdFdtBaseAddress
++
++[Pcd]
++  gEfiMdePkgTokenSpaceGuid.PcdUartDefaultBaudRate
++  gEfiMdePkgTokenSpaceGuid.PcdUartDefaultDataBits
++  gEfiMdePkgTokenSpaceGuid.PcdUartDefaultParity
++  gEfiMdePkgTokenSpaceGuid.PcdUartDefaultStopBits
++
++[Depex]
++  TRUE
+diff --git a/Platform/RaspberryPi/RPi5/RPi5.dsc b/Platform/RaspberryPi/RPi5/RPi5.dsc
+index 61cdeff..7bd07ce 100644
+--- a/Platform/RaspberryPi/RPi5/RPi5.dsc
++++ b/Platform/RaspberryPi/RPi5/RPi5.dsc
+@@ -565,6 +565,8 @@
+   MdeModulePkg/Universal/Console/GraphicsConsoleDxe/GraphicsConsoleDxe.inf
+   MdeModulePkg/Universal/Console/TerminalDxe/TerminalDxe.inf
+   MdeModulePkg/Universal/SerialDxe/SerialDxe.inf
++  # Second serial port: GPIO 14/15 (UART0 of the RP1)
++  Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.inf
+   Platform/RaspberryPi/Drivers/DisplayDxe/DisplayDxe.inf
+   EmbeddedPkg/Drivers/ConsolePrefDxe/ConsolePrefDxe.inf
+ 
+diff --git a/Platform/RaspberryPi/RPi5/RPi5.fdf b/Platform/RaspberryPi/RPi5/RPi5.fdf
+index e4a2dc0..c995499 100644
+--- a/Platform/RaspberryPi/RPi5/RPi5.fdf
++++ b/Platform/RaspberryPi/RPi5/RPi5.fdf
+@@ -214,6 +214,7 @@ READ_LOCK_STATUS   = TRUE
+   INF MdeModulePkg/Universal/Console/GraphicsConsoleDxe/GraphicsConsoleDxe.inf
+   INF MdeModulePkg/Universal/Console/TerminalDxe/TerminalDxe.inf
+   INF MdeModulePkg/Universal/SerialDxe/SerialDxe.inf
++  INF Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.inf
+   INF Platform/RaspberryPi/Drivers/DisplayDxe/DisplayDxe.inf
+   INF EmbeddedPkg/Drivers/ConsolePrefDxe/ConsolePrefDxe.inf
+ 

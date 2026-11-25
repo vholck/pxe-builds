@@ -1,0 +1,121 @@
+name: Build CoreOS stage image
+
+# Builds the image the pxe stack's coreos-stage service runs: the Fedora CoreOS
+# boot scripts and, for the last six stable releases, the extra initrd a
+# Raspberry Pi 5 needs (coreos-build/README.md).
+#
+# Runs daily to pick up new CoreOS releases. Each release's extra initrd is
+# built once and kept as an asset of the GitHub release "coreos-extra-initrds".
+# The image tag is a hash of its content: when nothing changed (no new release,
+# no script change), nothing is pushed or pinned.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - coreos-build/**
+      - .github/workflows/build-coreos.yml
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/vholck/pxe-builds/coreos
+  STORE_RELEASE: coreos-extra-initrds
+
+concurrency:
+  group: build-coreos
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch extra initrds built earlier
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p store
+          if gh release view "$STORE_RELEASE" >/dev/null 2>&1; then
+            gh release download "$STORE_RELEASE" --dir store --pattern 'fedora-coreos-*'
+          else
+            gh release create "$STORE_RELEASE" --title "Fedora CoreOS extra initrds (Raspberry Pi 5)" \
+              --notes "Built by .github/workflows/build-coreos.yml (coreos-build/build-extra-initrd.sh). fedora-coreos-<version>-aarch64.cpio adds rp1_pci to that release's live initramfs; a .none file means the release needs nothing. Each file fits exactly one release." \
+              --latest=false
+          fi
+          ls -l store
+
+      - name: Build missing extra initrds and assemble the TFTP tree
+        id: assemble
+        run: |
+          set -eu
+          docker build -t coreos-build coreos-build
+          bash coreos-build/assemble.sh store output | tee assemble.log
+          grep -E '^(content|newest)=' assemble.log >> "$GITHUB_OUTPUT"
+          ls -lR output/tftp
+
+      - name: Save new extra initrds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          have=$(gh release view "$STORE_RELEASE" --json assets --jq '.assets[].name')
+          for f in store/fedora-coreos-*; do
+            echo "$have" | grep -qxF "$(basename "$f")" && continue
+            gh release upload "$STORE_RELEASE" "$f"
+          done
+
+      - name: Check whether an image with this content exists
+        id: pin
+        env:
+          CONTENT: ${{ steps.assemble.outputs.content }}
+        run: |
+          set -eu
+          # The tag is the content hash: an existing tag means nothing changed
+          if docker manifest inspect "${IMAGE_NAME}:${CONTENT}" >/dev/null 2>&1; then
+            echo "Image ${IMAGE_NAME}:${CONTENT} exists; nothing to push or pin." >> "$GITHUB_STEP_SUMMARY"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push stage image
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          CONTENT: ${{ steps.assemble.outputs.content }}
+        run: |
+          set -eu
+          mkdir stage-context
+          cp -r output/tftp stage-context/tftp
+          cp coreos-build/stage.sh stage-context/stage.sh
+          docker build -f coreos-build/Dockerfile.stage \
+            --label org.opencontainers.image.revision="$(git rev-parse HEAD)" \
+            -t "${IMAGE_NAME}:${CONTENT}" stage-context
+          docker push "${IMAGE_NAME}:${CONTENT}"
+          docker tag "${IMAGE_NAME}:${CONTENT}" "${IMAGE_NAME}:latest"
+          docker push "${IMAGE_NAME}:latest"
+
+      - name: Pin the image in the stacks repository
+        if: steps.pin.outputs.changed == 'true'
+        uses: ./.github/actions/pin-in-stacks
+        with:
+          key: COREOS_IMAGE_TAG
+          value: "${{ steps.assemble.outputs.content }}"
+          message: "chore(pxe): pin coreos image to ${{ steps.assemble.outputs.content }} (Fedora CoreOS ${{ steps.assemble.outputs.newest }})"
+          token: ${{ secrets.STACKS_TOKEN }}
