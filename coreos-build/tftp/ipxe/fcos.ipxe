@@ -1,0 +1,103 @@
+#!ipxe
+# Fedora CoreOS, live PXE: the system runs from RAM, nothing is written to disk
+# unless the Ignition config or the user does so (coreos-installer).
+# Published by the coreos stage image (coreos-build in pxe-builds).
+#
+# Reached from the netboot.xyz menu (Custom URL Menu, ipxe/custom/custom.ipxe)
+# or from a per-device script, ipxe/hosts/<mac>.ipxe:
+#     #!ipxe
+#     chain tftp://${next-server}/ipxe/fcos.ipxe
+# A per-device script may set, before that line:
+#     set fcos_version 45.20261030.3.1   a stable release (default: the newest
+#                                        stable release in the image)
+#     set fcos_kargs <arguments>         extra kernel arguments
+#
+# Ignition: the first of these files that exists in the TFTP root is used,
+#     coreos/ignition/<mac>.ign   MAC lower-case with hyphens, e.g. 02-00-00-00-00-01.ign
+#     coreos/ignition/default.ign
+# otherwise the live system starts without a config. iPXE hands the file to
+# the kernel inside an initrd as /config.ign (as "coreos-installer pxe
+# ignition wrap" does). ignition.config.url=tftp://... is not used: Ignition
+# does not retry TFTP, and on a Pi 5 the network comes up after it gives up.
+#
+# Raspberry Pi 5 (any aarch64 machine): the live initramfs lacks rp1_pci, the
+# driver the Pi 5's Ethernet needs, so this script adds the extra initrd built
+# for that release (coreos/initrd/, see build-extra-initrd.sh). The image has
+# them for the last six stable releases. rd.driver.pre=rp1_pci loads the driver
+# early; on other aarch64 machines it finds no device and does nothing.
+#
+# No console= argument: on a Pi 5 the firmware's device tree decides (GPIO
+# serial when no display is connected, the display otherwise); add one with
+# fcos_kargs if needed.
+
+isset ${fcos_stream} || set fcos_stream stable
+isset ${fcos_version} || chain --autofree tftp://${next-server}/ipxe/coreos/fedora-coreos-${fcos_stream}.ipxe || goto no_version
+isset ${fcos_version} || goto no_version
+
+# Under UEFI iPXE hands Linux every registered image except the kernel as one
+# initrd. A script that has finished stays registered (netboot.xyz's
+# version.ipxe, for one), and its text in front of the initramfs makes Linux
+# reject the whole initramfs: the Pi 5 then stopped without a single line
+# (2026-11-21). Scripts still running (this one, the menus that chained it) are
+# not registered while they run, so this frees only leftovers.
+imgfree ||
+
+iseq ${buildarch} arm64 && set fcos_arch aarch64 || set fcos_arch x86_64
+iseq ${fcos_arch} x86_64 && cpuid --ext 29 || iseq ${fcos_arch} aarch64 || goto not_64bit
+
+set fcos_base https://builds.coreos.fedoraproject.org/prod/streams/${fcos_stream}/builds/${fcos_version}/${fcos_arch}
+set fcos_name fedora-coreos-${fcos_version}-live
+set fcos_rp1
+iseq ${fcos_arch} aarch64 && set fcos_rp1 rd.driver.pre=rp1_pci ||
+
+echo Fedora CoreOS ${fcos_version} (${fcos_stream}, ${fcos_arch}), live PXE
+kernel --name fcos-kernel ${fcos_base}/${fcos_name}-kernel.${fcos_arch} coreos.live.rootfs_url=${fcos_base}/${fcos_name}-rootfs.${fcos_arch}.img ip=dhcp rd.neednet=1 ignition.firstboot ignition.platform.id=metal ${fcos_rp1} ${fcos_kargs} || goto failed
+initrd --name fcos-initramfs ${fcos_base}/${fcos_name}-initramfs.${fcos_arch}.img || goto failed
+
+iseq ${fcos_arch} aarch64 || goto ignition
+initrd --name fcos-extra tftp://${next-server}/coreos/initrd/fedora-coreos-${fcos_version}-aarch64.cpio && goto ignition ||
+echo No extra initrd for ${fcos_version} in coreos/initrd/: either this release does
+echo not need one, or it is older than the six the image keeps. On a Raspberry Pi 5
+echo the live system then has no network and stops waiting for its root file system.
+imgfetch tftp://${next-server}/ipxe/log/fcos-no-extra-initrd-${fcos_version} ||
+
+:ignition
+initrd --name fcos-ignition tftp://${next-server}/coreos/ignition/${netX/mac:hexhyp}.ign /config.ign mode=644 && goto boot ||
+initrd --name fcos-ignition tftp://${next-server}/coreos/ignition/default.ign /config.ign mode=644 && goto boot ||
+echo No Ignition config (coreos/ignition/${netX/mac:hexhyp}.ign or default.ign): starting without one
+
+:boot
+# Device tree (arm64 only, design rule R3 of pxe-builds): Fedora's kernel needs the upstream Linux
+# tree on a Raspberry Pi (on the Pi 5 it finds no Ethernet or USB with
+# Raspberry Pi's own). The firmware (U-Boot or UEFI of pxe-builds) names the board's
+# tree in the UEFI variable FdtFile; the rpi-uboot image serves those trees
+# under rpi/upstream/. Machines without the variable (ACPI servers, other boards) keep
+# what their firmware hands over; without a tree for the board (Compute Modules)
+# the Pi keeps the firmware's tree. Must come after the last imgfree.
+iseq ${fcos_arch} aarch64 || goto boot_now
+isset ${efi/FdtFile:string} || goto boot_now
+fdt tftp://${next-server}/rpi/upstream/${efi/FdtFile:string} && goto boot_now ||
+echo No upstream device tree rpi/upstream/${efi/FdtFile:string}: using the firmware's
+imgfetch tftp://${next-server}/ipxe/log/fcos-no-tree-${efi/FdtFile:uristring} ||
+:boot_now
+boot || goto failed
+
+:no_version
+echo Fedora CoreOS: no release set (fcos_version) and ipxe/coreos/fedora-coreos-${fcos_stream}.ipxe is missing
+goto failed
+
+:not_64bit
+echo Fedora CoreOS needs a 64-bit machine
+goto failed
+
+:failed
+imgfetch tftp://${next-server}/ipxe/log/fcos-failed-${fcos_version} ||
+# free what this script loaded, so nothing leaks into whatever boots next
+imgfree fcos-kernel ||
+imgfree fcos-initramfs ||
+imgfree fcos-extra ||
+imgfree fcos-ignition ||
+# and the device tree, which has no fixed name (running scripts are not registered)
+imgfree ||
+prompt --timeout 10000 Fedora CoreOS did not start; press a key or wait 10 s ||
+exit 1

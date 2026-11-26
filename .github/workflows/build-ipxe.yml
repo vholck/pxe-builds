@@ -1,0 +1,138 @@
+name: Build ipxe-build image
+
+# Compiles iPXE with the settings from build.env and packages the
+# binaries, boot scripts and dnsmasq.conf into the ipxe-build stage image.
+# The machine that serves the files only pulls the image.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ipxe-build/**
+      - build.env
+      # documentation only: no rebuild, no pin, no redeploy
+      - '!**.md'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (branch, tag, or full commit SHA). Defaults to the branch selected above.'
+        required: false
+        default: ''
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/vholck/pxe-builds/ipxe-build
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Resolve SHA
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # build.env also holds the settings of the other images. Editing those
+      # triggers this workflow but changes nothing iPXE is built from, so skip
+      # the build when an image for these inputs exists.
+      - name: Check whether these inputs are already built
+        id: inputs
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -eu
+          set -a
+          . ./build.env
+          set +a
+          # Fingerprint: every file in the build context except documentation,
+          # plus the build settings
+          hash=$( {
+            git ls-files -s ipxe-build | grep -v '\.md$'
+            printf '%s\n' "$IPXE_REF" "$IPXE_PRODUCT_NAME" "$IPXE_KEYBOARD_MAP" "$IPXE_ON_FAILURE" \
+              "${IPXE_IPV6:-0}" "${IPXE_SERIAL_CONSOLE:-bios}" "${IPXE_TRUST_NETBOOTXYZ:-1}" "${IPXE_TLS_MAX:-1.3}" "$IPXE_DEBUG" "$IPXE_BUILD_TAG" "$BUILD_EXTRA_IPXE_ARTIFACTS" "$BUILD_OPTIONAL_IPXE_MEDIA"
+          } | sha256sum | cut -c1-20 )
+          echo "tag=inputs-${hash}" >> "$GITHUB_OUTPUT"
+          # A manual run always builds
+          if [ "$EVENT" = "push" ] && docker manifest inspect "${IMAGE_NAME}:inputs-${hash}" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "An image for these build inputs already exists (${IMAGE_NAME}:inputs-${hash}); nothing to build or pin." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build image (compiles iPXE)
+        if: steps.inputs.outputs.skip != 'true'
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -eu
+          # Settings are read from build.env, never from workflow inputs.
+          set -a
+          . ./build.env
+          set +a
+          docker build \
+            --build-arg "IPXE_REF=${IPXE_REF}" \
+            --build-arg "IPXE_PRODUCT_NAME=${IPXE_PRODUCT_NAME}" \
+            --build-arg "IPXE_KEYBOARD_MAP=${IPXE_KEYBOARD_MAP}" \
+            --build-arg "IPXE_ON_FAILURE=${IPXE_ON_FAILURE}" \
+            --build-arg "IPXE_IPV6=${IPXE_IPV6:-0}" \
+            --build-arg "IPXE_SERIAL_CONSOLE=${IPXE_SERIAL_CONSOLE:-bios}" \
+            --build-arg "IPXE_TRUST_NETBOOTXYZ=${IPXE_TRUST_NETBOOTXYZ:-1}" \
+            --build-arg "IPXE_TLS_MAX=${IPXE_TLS_MAX:-1.3}" \
+            --build-arg "IPXE_DEBUG=${IPXE_DEBUG}" \
+            --build-arg "IPXE_BUILD_TAG=${IPXE_BUILD_TAG}" \
+            --build-arg "BUILD_EXTRA_IPXE_ARTIFACTS=${BUILD_EXTRA_IPXE_ARTIFACTS}" \
+            --build-arg "BUILD_OPTIONAL_IPXE_MEDIA=${BUILD_OPTIONAL_IPXE_MEDIA}" \
+            -t "${IMAGE_NAME}:${SHA}" \
+            ipxe-build
+          # Copy the published tree out of the image for the workflow artifact
+          cid=$(docker create "${IMAGE_NAME}:${SHA}")
+          docker cp "${cid}:/assets" ./assets
+          docker rm "${cid}"
+
+      - name: Push image
+        if: steps.inputs.outputs.skip != 'true'
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+          INPUTS_TAG: ${{ steps.inputs.outputs.tag }}
+          TAG_LATEST: ${{ github.event_name == 'push' || inputs.ref == '' }}
+        run: |
+          set -eu
+          docker push "${IMAGE_NAME}:${SHA}"
+          # Marks this set of build inputs as built (see the check step above)
+          docker tag "${IMAGE_NAME}:${SHA}" "${IMAGE_NAME}:${INPUTS_TAG}"
+          docker push "${IMAGE_NAME}:${INPUTS_TAG}"
+          if [ "${TAG_LATEST}" = "true" ]; then
+            docker tag "${IMAGE_NAME}:${SHA}" "${IMAGE_NAME}:latest"
+            docker push "${IMAGE_NAME}:latest"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: steps.inputs.outputs.skip != 'true'
+        with:
+          name: pxe-assets-${{ steps.sha.outputs.sha }}
+          path: assets/
+          retention-days: 30
+
+      - name: Pin the image in the stacks repository
+        if: steps.inputs.outputs.skip != 'true' && (github.event_name == 'push' || inputs.ref == '')
+        uses: ./.github/actions/pin-in-stacks
+        with:
+          key: IPXE_BUILD_IMAGE_TAG
+          value: "${{ steps.sha.outputs.sha }}"
+          message: "chore(pxe): pin ipxe-build image to ${{ steps.sha.outputs.sha }}"
+          ssh-key: ${{ secrets.STACKS_DEPLOY_KEY }}

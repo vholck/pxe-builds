@@ -1,0 +1,80 @@
+name: Pin image tag in the stacks repository
+description: >
+  Sets <key>=<value> in stacks/pxe/.env.override of the repository that deploys
+  the images, regenerates its stacks/pxe/.env, commits and pushes over SSH
+  with a deploy key of that repository. Skips with a warning when no key is
+  configured.
+
+inputs:
+  key:
+    description: Variable in stacks/pxe/.env.override, e.g. NFS_IMAGE_TAG
+    required: true
+  value:
+    description: The new image tag
+    required: true
+  message:
+    description: Commit message
+    required: true
+  ssh-key:
+    description: Private key of a deploy key with write access to the stacks repository (secret STACKS_DEPLOY_KEY)
+    required: true
+  repository:
+    description: owner/name of the stacks repository
+    required: false
+    default: vholck/stacks
+
+runs:
+  using: composite
+  steps:
+    - name: Pin
+      shell: bash
+      env:
+        KEY: ${{ inputs.key }}
+        VALUE: ${{ inputs.value }}
+        COMMIT_MSG: ${{ inputs.message }}
+        SSH_KEY: ${{ inputs.ssh-key }}
+        TARGET_REPO: ${{ inputs.repository }}
+        SOURCE: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+      run: |
+        set -eu
+        if [ -z "$SSH_KEY" ]; then
+          echo "::warning::STACKS_DEPLOY_KEY is not set: image built and pushed, but $KEY was not pinned in $TARGET_REPO"
+          exit 0
+        fi
+        keyfile=$(mktemp)
+        trap 'rm -f "$keyfile"' EXIT
+        printf '%s\n' "$SSH_KEY" > "$keyfile"
+        chmod 600 "$keyfile"
+        export GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+        dir=$(mktemp -d)
+        git clone --quiet --depth 1 --branch main "git@github.com:${TARGET_REPO}.git" "$dir"
+        cd "$dir"
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        file=stacks/pxe/.env.override
+        grep -q "^${KEY}=" "$file" || { echo "::error::$KEY not found in $TARGET_REPO/$file"; exit 1; }
+        attempt=1
+        while :; do
+          sed -i "s/^${KEY}=.*/${KEY}=${VALUE}/" "$file"
+          bash .github/scripts/merge-stack-env-overrides.sh pxe
+          git add "$file" stacks/pxe/.env
+          if git diff --cached --quiet; then
+            echo "$KEY is already $VALUE in $TARGET_REPO"
+            exit 0
+          fi
+          # [skip ci]: a pin starts no workflow in the stacks repository (its
+          # deployment polls git and needs none)
+          git commit --quiet -m "$COMMIT_MSG [skip ci]" -m "Built by $SOURCE"
+          git push --quiet origin HEAD:main && break
+          # Other pins push to the same branch: start again from its new tip
+          [ "$attempt" -ge 4 ] && { echo "::error::push to $TARGET_REPO still rejected after $attempt attempts"; exit 1; }
+          attempt=$((attempt + 1))
+          sleep $((attempt * 3))
+          git fetch --quiet --depth 1 origin main
+          git reset --quiet --hard origin/main
+        done
+        {
+          echo "## $COMMIT_MSG"
+          echo ""
+          echo "Pinned \`$KEY=$VALUE\` in $TARGET_REPO (\`$(git rev-parse --short HEAD)\`)."
+        } >> "$GITHUB_STEP_SUMMARY"

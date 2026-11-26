@@ -1,0 +1,144 @@
+diff --git a/src/include/ipxe/errfile.h b/src/include/ipxe/errfile.h
+index 8f6e844..4501f80 100644
+--- a/src/include/ipxe/errfile.h
++++ b/src/include/ipxe/errfile.h
+@@ -95,6 +95,7 @@ FILE_SECBOOT ( PERMITTED );
+ #define ERRFILE_datauri		       ( ERRFILE_CORE | 0x00360000 )
+ #define ERRFILE_dmesg		       ( ERRFILE_CORE | 0x00370000 )
+ #define ERRFILE_iort		       ( ERRFILE_CORE | 0x00380000 )
++#define ERRFILE_efi_fdt		       ( ERRFILE_CORE | 0x00390000 )
+ 
+ #define ERRFILE_eisa		     ( ERRFILE_DRIVER | 0x00000000 )
+ #define ERRFILE_isa		     ( ERRFILE_DRIVER | 0x00010000 )
+diff --git a/src/interface/efi/efi_fdt.c b/src/interface/efi/efi_fdt.c
+index cd8580f..c30cd68 100644
+--- a/src/interface/efi/efi_fdt.c
++++ b/src/interface/efi/efi_fdt.c
+@@ -25,7 +25,10 @@ FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
+ FILE_SECBOOT ( PERMITTED );
+ 
+ #include <string.h>
++#include <errno.h>
+ #include <byteswap.h>
++#include <ipxe/image.h>
++#include <ipxe/umalloc.h>
+ #include <ipxe/fdt.h>
+ #include <ipxe/init.h>
+ #include <ipxe/efi/efi.h>
+@@ -39,6 +42,45 @@ FILE_SECBOOT ( PERMITTED );
+  *
+  */
+ 
++/** EFI Device Tree Fixup Protocol GUID (EBBR; provided by U-Boot) */
++#define EFI_DT_FIXUP_PROTOCOL_GUID					\
++	{ 0xe617d64c, 0xfe08, 0x46da,					\
++	  { 0xf4, 0xdc, 0xbb, 0xd5, 0x87, 0x0c, 0x73, 0x00 } }
++
++/** Apply the firmware's own fixups (MAC addresses, memory, console, ...) */
++#define EFI_DT_APPLY_FIXUPS 0x00000001
++
++/** Reserve the tree's reserved memory in the UEFI memory map */
++#define EFI_DT_RESERVE_MEMORY 0x00000002
++
++/** EFI Device Tree Fixup Protocol */
++typedef struct _EFI_DT_FIXUP_PROTOCOL EFI_DT_FIXUP_PROTOCOL;
++
++/**
++ * Fix up a device tree
++ *
++ * @v This		Protocol instance
++ * @v Fdt		Device tree
++ * @v BufferSize	Buffer size (updated if too small)
++ * @v Flags		Actions to perform
++ * @ret efirc		EFI status code
++ */
++typedef EFI_STATUS ( EFIAPI * EFI_DT_FIXUP ) ( EFI_DT_FIXUP_PROTOCOL *This,
++					       VOID *Fdt, UINTN *BufferSize,
++					       UINT32 Flags );
++
++/** EFI Device Tree Fixup Protocol */
++struct _EFI_DT_FIXUP_PROTOCOL {
++	/** Revision */
++	UINT64 Revision;
++	/** Fix up a device tree */
++	EFI_DT_FIXUP Fixup;
++};
++
++/** EFI Device Tree Fixup Protocol, if the firmware provides one */
++static EFI_DT_FIXUP_PROTOCOL *efi_dt_fixup;
++EFI_REQUEST_PROTOCOL ( EFI_DT_FIXUP_PROTOCOL, &efi_dt_fixup );
++
+ /** EFI Flattened Device Tree configuration table */
+ static struct fdt_header *efi_fdt;
+ EFI_USE_TABLE ( FDT_TABLE, &efi_fdt, 0 );
+@@ -106,6 +148,51 @@ static void *efi_fdt_backup;
+ /** EFI Flattened Device Tree installed table */
+ static struct fdt_header *efi_fdt_installed;
+ 
++/**
++ * Let the firmware fix up a device tree loaded from an image
++ *
++ * @ret rc		Return status code
++ *
++ * Firmware that provides the EFI Device Tree Fixup Protocol (U-Boot)
++ * applies to a tree loaded by the boot loader the same fixups it
++ * applies to its own tree, as systemd-boot and other EFI loaders ask.
++ */
++static int efi_fdt_fixup ( void ) {
++	UINT32 flags = ( EFI_DT_APPLY_FIXUPS | EFI_DT_RESERVE_MEMORY );
++	struct fdt_header *hdr;
++	UINTN size;
++	EFI_STATUS efirc;
++	int rc;
++
++	/* Do nothing unless the firmware can fix up a loaded tree */
++	if ( ! ( efi_dt_fixup && efi_fdt_installed &&
++		 find_image_tag ( &fdt_image ) ) )
++		return 0;
++
++	/* Fix up, growing the buffer once if the firmware asks for it */
++	size = be32_to_cpu ( efi_fdt_installed->totalsize );
++	efirc = efi_dt_fixup->Fixup ( efi_dt_fixup, efi_fdt_installed,
++				      &size, flags );
++	if ( efirc == EFI_BUFFER_TOO_SMALL ) {
++		hdr = urealloc ( efi_fdt_installed, size );
++		if ( ! hdr )
++			return -ENOMEM;
++		efi_fdt_installed = hdr;
++		efirc = efi_dt_fixup->Fixup ( efi_dt_fixup, efi_fdt_installed,
++					      &size, flags );
++	}
++	if ( efirc != 0 ) {
++		rc = -EEFI ( efirc );
++		DBGC ( &efi_fdt, "EFIFDT could not fix up: %s\n",
++		       strerror ( rc ) );
++		return rc;
++	}
++	DBGC ( &efi_fdt, "EFIFDT fixed up by firmware (%#zx bytes)\n",
++	       ( ( size_t ) size ) );
++
++	return 0;
++}
++
+ /**
+  * Install EFI Flattened Device Tree table
+  *
+@@ -122,6 +209,10 @@ int efi_fdt_install ( const char *cmdline ) {
+ 		goto err_create;
+ 	}
+ 
++	/* Let the firmware fix up a tree loaded from an image */
++	if ( ( rc = efi_fdt_fixup() ) != 0 )
++		goto err_fixup;
++
+ 	/* Install table */
+ 	if ( ( rc = efi_install_table ( &efi_fdt_table, efi_fdt_installed,
+ 					&efi_fdt_backup ) ) != 0 ) {
+@@ -134,6 +225,7 @@ int efi_fdt_install ( const char *cmdline ) {
+ 
+ 	efi_uninstall_table ( &efi_fdt_table, &efi_fdt_backup );
+  err_install:
++ err_fixup:
+ 	fdt_remove ( efi_fdt_installed );
+  err_create:
+ 	return rc;

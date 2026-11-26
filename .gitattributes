@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.ipxe text eol=lf
+# Patch files must stay byte-identical (some target sources use CRLF)
+*.patch -text

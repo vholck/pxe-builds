@@ -1,0 +1,57 @@
+diff --git a/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBm.c b/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBm.c
+index 68587da..4549ec3 100644
+--- a/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBm.c
++++ b/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBm.c
+@@ -898,6 +898,8 @@ PlatformBootManagerUnableToBoot (
+   EFI_BOOT_MANAGER_LOAD_OPTION *BootOptions;
+   UINTN                        OldBootOptionCount;
+   UINTN                        NewBootOptionCount;
++  EFI_EVENT                    WaitList[2];
++  BOOLEAN                      KeyPressed;
+ 
+   //
+   // Record the total number of boot configured boot options
+@@ -946,16 +948,39 @@ PlatformBootManagerUnableToBoot (
+   // AsciiPrint() will NULL-check gST->ConOut internally. We check gST->ConIn
+   // here to see if it makes sense to request and wait for a keypress.
+   //
++  // A machine that found nothing to boot must not stay here for good: a
++  // network boot server may only have been unreachable, or a boot menu may
++  // have timed out with nobody at the keyboard. Wait 10 seconds for a key,
++  // then reset and start over.
++  //
++  KeyPressed = FALSE;
+   if (gST->ConIn != NULL) {
+     AsciiPrint (
+       "%a: No bootable option or device was found.\n"
+-      "%a: Press any key to enter the Boot Manager Menu.\n",
++      "%a: Press any key to enter the Boot Manager Menu. Resetting in 10 seconds.\n",
+       gEfiCallerBaseName,
+       gEfiCallerBaseName);
+-    Status = gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &Index);
+-    ASSERT_EFI_ERROR (Status);
+-    ASSERT (Index == 0);
++    WaitList[0] = gST->ConIn->WaitForKey;
++    Status = gBS->CreateEvent (EVT_TIMER, 0, NULL, NULL, &WaitList[1]);
++    if (!EFI_ERROR (Status)) {
++      Status = gBS->SetTimer (WaitList[1], TimerRelative,
++                      EFI_TIMER_PERIOD_SECONDS (10));
++      if (!EFI_ERROR (Status)) {
++        Status = gBS->WaitForEvent (2, WaitList, &Index);
++        KeyPressed = (BOOLEAN)(!EFI_ERROR (Status) && Index == 0);
++      }
++      gBS->CloseEvent (WaitList[1]);
++    }
++  } else {
++    gBS->Stall (10 * 1000 * 1000);
++  }
+ 
++  if (!KeyPressed) {
++    AsciiPrint ("%a: Resetting.\n", gEfiCallerBaseName);
++    gRT->ResetSystem (EfiResetCold, EFI_SUCCESS, 0, NULL);
++  }
++
++  if (gST->ConIn != NULL) {
+     //
+     // Drain any queued keys.
+     //

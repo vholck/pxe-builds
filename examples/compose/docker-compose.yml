@@ -1,0 +1,184 @@
+# Example deployment of the pxe-builds images: dnsmasq as ProxyDHCP + TFTP
+# server, fed by the one-shot "stage" containers, with optional Matchbox, NFS
+# and iSCSI servers. Copy this directory, fill in .env (see .env.example) and
+# run: docker compose up -d
+#
+# The router stays the DHCP server: dnsmasq only answers PXE clients
+# (ProxyDHCP) and serves the files over TFTP. It gets its own address on the
+# LAN through a macvlan network; the Docker host itself cannot reach that
+# address (macvlan), other machines can.
+#
+# Each stage container copies the files of its image into the TFTP root and
+# exits; dnsmasq starts when all of them have succeeded. A stage container
+# deletes only files listed in its own manifest
+# (build-info/<image>/published-files), so files you add yourself stay:
+# per-machine iPXE scripts in ipxe/hosts/<mac>.ipxe, Ignition configs in
+# coreos/ignition/, a <serial>/ directory for one Raspberry Pi.
+
+x-user-env: &user_env
+  # Owner of the published files on the host
+  PUID: ${PUID:-1000}
+  PGID: ${PGID:-1000}
+
+x-net-env: &net_env
+  # Router of the PXE subnet, and its netmask
+  LAN_GATEWAY: ${LAN_GATEWAY:?set LAN_GATEWAY in .env}
+  LAN_NETMASK: ${LAN_NETMASK:?set LAN_NETMASK in .env}
+  # Address of the dnsmasq container: a free address outside the DHCP pool
+  PXE_LAN_IP: ${PXE_LAN_IP:?set PXE_LAN_IP in .env}
+  # What a client boots when it has no ipxe/hosts/<mac>.ipxe script: any URI
+  # iPXE can fetch. tftp://<PXE_LAN_IP>/ipxe/netbootxyz.ipxe = the netboot.xyz menu.
+  IPXE_CHAIN_URI: ${IPXE_CHAIN_URI:?set IPXE_CHAIN_URI in .env}
+
+x-tftp: &tftp
+  type: bind
+  source: ${TFTP_DIR:-./tftp}
+  bind:
+    create_host_path: true
+  target: /out
+
+services:
+  # iPXE for BIOS, UEFI and the Pis, the boot scripts (ipxe/), build details
+  # (build-info/) and the rendered dnsmasq.conf (volume "config").
+  tftp-stage:
+    image: ghcr.io/vholck/pxe-builds/ipxe-build:latest
+    restart: "no"
+    environment:
+      <<: [*net_env, *user_env]
+      MATCHBOX_ENABLED: ${MATCHBOX_ENABLED:-0}
+      # ipxe.kpxe (iPXE's own drivers, default) or undionly.kpxe for BIOS clients;
+      # MACs listed in IPXE_BIOS_UNDI_MACS get undionly.kpxe anyway
+      IPXE_BIOS_FILE: ${IPXE_BIOS_FILE:-ipxe.kpxe}
+      IPXE_BIOS_UNDI_MACS: ${IPXE_BIOS_UNDI_MACS:-}
+    volumes:
+      - *tftp
+      - type: volume
+        source: config
+        target: /config
+
+  # Raspberry Pi firmware and U-Boot for Pi 3, 4 and 5 (shared by every Pi)
+  rpi-uboot-stage:
+    image: ghcr.io/vholck/pxe-builds/rpi-uboot:latest
+    restart: "no"
+    environment:
+      <<: *user_env
+    volumes:
+      - *tftp
+
+  # UEFI firmware instead of U-Boot for the Pis listed by serial (last 8 hex
+  # digits of "Serial" in /proc/cpuinfo), each under its own model
+  rpi-uefi-stage:
+    image: ghcr.io/vholck/pxe-builds/rpi-uefi:latest
+    restart: "no"
+    environment:
+      <<: *user_env
+      RPI5_UEFI_SERIALS: ${RPI5_UEFI_SERIALS:-}
+      RPI4_UEFI_SERIALS: ${RPI4_UEFI_SERIALS:-}
+      RPI3_UEFI_SERIALS: ${RPI3_UEFI_SERIALS:-}
+    volumes:
+      - *tftp
+
+  # Fedora CoreOS boot scripts and the extra initrds a Pi 5 needs
+  coreos-stage:
+    image: ghcr.io/vholck/pxe-builds/coreos:latest
+    restart: "no"
+    environment:
+      <<: *user_env
+    volumes:
+      - *tftp
+
+  dnsmasq:
+    # dnsmasq 2.91: 2.92 sends wrong TFTP data after a request sequence every
+    # iPXE boot produces (see UPSTREAM.md of pxe-builds)
+    image: quay.io/poseidon/dnsmasq:v0.5.0-48-gbbba844
+    restart: unless-stopped
+    entrypoint: []
+    command: ["dnsmasq", "-d", "--conf-file=/config/dnsmasq.conf"]
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      tftp-stage: { condition: service_completed_successfully }
+      rpi-uboot-stage: { condition: service_completed_successfully }
+      rpi-uefi-stage: { condition: service_completed_successfully }
+      coreos-stage: { condition: service_completed_successfully }
+    networks:
+      lan:
+        ipv4_address: ${PXE_LAN_IP}
+    volumes:
+      - type: bind
+        source: ${TFTP_DIR:-./tftp}
+        target: /var/lib/tftpboot
+        read_only: true
+      - type: volume
+        source: config
+        target: /config
+        read_only: true
+
+  # Optional: Matchbox (http://<PXE_LAN_IP>:8080) picks a boot profile per
+  # machine; ipxe/boot.ipxe asks it when MATCHBOX_ENABLED=1.
+  matchbox:
+    image: quay.io/poseidon/matchbox:v0.11.0-375-gc0d0ff60
+    restart: unless-stopped
+    profiles: [matchbox]
+    network_mode: service:dnsmasq
+    command: ["-address=0.0.0.0:8080", "-data-path=/var/lib/matchbox", "-assets-path=/var/lib/matchbox/assets"]
+    volumes:
+      - type: bind
+        source: ${MATCHBOX_DIR:-./matchbox}
+        bind:
+          create_host_path: true
+        target: /var/lib/matchbox
+
+  # Optional: NFS server for root file systems on NFS (nfs-build/README.md)
+  nfs:
+    image: ghcr.io/vholck/pxe-builds/nfs:latest
+    restart: unless-stopped
+    profiles: [nfs]
+    init: true
+    network_mode: service:dnsmasq
+    environment:
+      <<: *user_env
+      NFS_ENABLED: "1"
+      NFS_CLIENTS: ${NFS_CLIENTS:-}
+      LAN_SUBNET: ${LAN_SUBNET:?set LAN_SUBNET in .env}
+    cap_add: [DAC_READ_SEARCH, SYS_ADMIN, SYS_RESOURCE]
+    ulimits:
+      nofile: { soft: 4096, hard: 4096 }
+    volumes:
+      - type: bind
+        source: ${NFS_DIR:-./nfs}
+        bind:
+          create_host_path: true
+        target: /srv/nfs
+
+  # Optional: iSCSI target for machines that boot from a network disk (iscsi-build/README.md)
+  iscsi:
+    image: ghcr.io/vholck/pxe-builds/iscsi:latest
+    restart: unless-stopped
+    profiles: [iscsi]
+    init: true
+    network_mode: service:dnsmasq
+    environment:
+      <<: *user_env
+      ISCSI_ENABLED: "1"
+      ISCSI_CLIENTS: ${ISCSI_CLIENTS:-}
+      LAN_SUBNET: ${LAN_SUBNET:?set LAN_SUBNET in .env}
+    volumes:
+      - type: bind
+        source: ${ISCSI_DIR:-./iscsi}
+        bind:
+          create_host_path: true
+        target: /srv/iscsi
+
+volumes:
+  config:
+
+networks:
+  lan:
+    driver: macvlan
+    driver_opts:
+      parent: ${LAN_PARENT_IF:?set LAN_PARENT_IF in .env}
+    ipam:
+      config:
+        - subnet: ${LAN_SUBNET:?set LAN_SUBNET in .env}
+          gateway: ${LAN_GATEWAY}

@@ -1,0 +1,62 @@
+Subject: [PATCH] net: macb: reset and configure the PHY only on the first start
+
+macb_phy_init() runs on every start of the interface. With the RP1 changes
+it pulses the PHY reset GPIO and calls phy_connect() and phy_config() each
+time, so every start drops the link and renegotiates. U-Boot's own dhcp
+and tftpboot tolerate that. An EFI application that starts DHCP right
+after initialising the interface does not: on a Raspberry Pi 5 about half
+of the boots lost the ProxyDHCP answer in iPXE.
+
+Reset, connect and configure the PHY only once.
+---
+diff --git a/drivers/net/macb.c b/drivers/net/macb.c
+index 7422c7bd59..68f32eb5e6 100644
+--- a/drivers/net/macb.c
++++ b/drivers/net/macb.c
+@@ -149,6 +149,7 @@ struct macb_device {
+ 	phy_interface_t		phy_interface;
+ 
+ 	struct gpio_desc phy_reset_gpio;
++	bool phy_reset_done;
+ 	int phy_reset_ms;
+ 	struct udevice *udev;
+ };
+@@ -726,8 +727,13 @@ static int macb_phy_init(struct udevice *dev, const char *name)
+ 	arch_get_mdio_control(name);
+ 	/* If port is not fixed -> setup PHY */
+ 	if (!macb_port_is_fixed_link(macb)) {
+-		/* Deassert PHY reset before scanning MDIO */
+-		if (dm_gpio_is_valid(&macb->phy_reset_gpio)) {
++		/*
++		 * Deassert PHY reset before scanning MDIO, but only once: a
++		 * reset on every start drops the link and renegotiates.
++		 */
++		if (dm_gpio_is_valid(&macb->phy_reset_gpio) &&
++		    !macb->phy_reset_done) {
++			macb->phy_reset_done = true;
+ 			dm_gpio_set_value(&macb->phy_reset_gpio, 1);
+ 			mdelay(macb->phy_reset_ms);
+ 			dm_gpio_set_value(&macb->phy_reset_gpio, 0);
+@@ -747,14 +753,16 @@ static int macb_phy_init(struct udevice *dev, const char *name)
+ 		}
+ 
+ #ifdef CONFIG_PHYLIB
+-		macb->phydev = phy_connect(macb->bus, macb->phy_addr, dev,
+-				     macb->phy_interface);
+ 		if (!macb->phydev) {
+-			printf("phy_connect failed\n");
+-			return -ENODEV;
+-		}
++			macb->phydev = phy_connect(macb->bus, macb->phy_addr, dev,
++						   macb->phy_interface);
++			if (!macb->phydev) {
++				printf("phy_connect failed\n");
++				return -ENODEV;
++			}
+ 
+-		phy_config(macb->phydev);
++			phy_config(macb->phydev);
++		}
+ #endif
+ 
+ 		status = macb_mdio_read(macb, macb->phy_addr, MII_BMSR);

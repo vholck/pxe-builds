@@ -1,0 +1,161 @@
+Subject: [PATCH] rpi: GPIO UART as the OS console on the Pi 5
+
+Two device trees reach the OS on a Pi 5, and in both the console should
+be the UART on GPIO 14 and 15, as on the Pi 3 and Pi 4.
+
+Raspberry Pi's own tree (handed over by default) names the debug
+connector's UART in stdout-path ("serial10:115200n8"), while its Pi 3
+and Pi 4 trees name serial0, the GPIO UART, which is serial0 on the Pi 5
+too. When the firmware's UART0 is enabled (enable_uart=1), stdout-path
+becomes "serial0:115200n8".
+
+The upstream device trees served for the Raspberry Pi 5 carry the RP1's
+UART0 as an "arm,sbsa-uart" node with the aliases serial0 and uart0 and
+stdout-path = "serial0:115200n8". A tree that U-Boot hands to an EFI
+program never passes through the firmware, so config.txt is not applied
+to it: in ft_board_setup(), for such a tree, enable the node and add the
+alias "console" when the firmware's own tree has its UART0 enabled, as
+the firmware does when UEFI boots the same tree.
+
+Other trees are left alone. Whether stdout-path stays (display present
+or not) is decided for every Pi by rpi_fdt_console_main().
+
+The test for the firmware's UART0 moves into rpi5_fw_gpio_uart_enabled(),
+shared with the GPIO console of U-Boot itself.
+---
+diff --git a/board/raspberrypi/rpi/rpi.c b/board/raspberrypi/rpi/rpi.c
+index d851c65f..aa3b07f3 100644
+--- a/board/raspberrypi/rpi/rpi.c
++++ b/board/raspberrypi/rpi/rpi.c
+@@ -713,6 +713,104 @@ void  update_fdt_from_fw(void *fdt, void *fw_fdt)
+ 	copy_property(fdt, fw_fdt, "/clocks/clk-uart", "clock-frequency");
+ }
+ 
++#ifdef CONFIG_BCM2712
++/*
++ * True when the firmware's device tree names the RP1's UART0 "serial0" and
++ * has it enabled, which is what enable_uart=1 in config.txt does.
++ */
++static bool rpi5_fw_gpio_uart_enabled(void)
++{
++	ofnode node = ofnode_get_aliases_node("serial0");
++
++	return ofnode_valid(node) && ofnode_is_enabled(node) &&
++	       ofnode_device_is_compatible(node, "arm,pl011-axi") &&
++	       ofnode_equal(node, ofnode_get_aliases_node("uart0"));
++}
++
++/*
++ * GPIO UART in an upstream device tree on the Pi 5.
++ *
++ * The upstream trees served for the Pi 5 have the RP1's UART0 (GPIO 14 and
++ * 15) as "arm,sbsa-uart", disabled, named by the aliases serial0 and uart0,
++ * and stdout-path = "serial0:115200n8". When the firmware loads such a tree
++ * itself (UEFI), it applies config.txt to it; a tree U-Boot hands over never
++ * passes through the firmware, so the same is done here: with enable_uart=1
++ * (the firmware's own tree has its UART0 enabled) the node is enabled and
++ * the alias "console" points to it, as the firmware's uart0_console
++ * parameter does. Whether stdout-path stays is decided for every Pi by
++ * rpi_fdt_console_main().
++ * A tree without such a node (the firmware's, or another one) is left alone.
++ */
++/*
++ * Raspberry Pi's own Pi 5 tree names the debug connector's UART as the
++ * console (stdout-path = "serial10:..."), while its Pi 3 and Pi 4 trees name
++ * serial0, the UART on GPIO 14 and 15, which is serial0 on the Pi 5 as well.
++ * With that UART enabled (enable_uart=1, which also points alias console at
++ * it), name serial0 here too, so the OS console is on the same pins on every
++ * Pi. Whether stdout-path stays at all is decided by rpi_fdt_console_main().
++ */
++static void rpi5_fdt_fw_console(void *blob)
++{
++	const char *cur;
++	int chosen, ret;
++
++	if (!rpi5_fw_gpio_uart_enabled())
++		return;
++	chosen = fdt_path_offset(blob, "/chosen");
++	if (chosen < 0)
++		return;
++	cur = fdt_getprop(blob, chosen, "stdout-path", NULL);
++	if (!cur || strncmp(cur, "serial10", 8))
++		return;
++	ret = fdt_setprop_string(blob, chosen, "stdout-path", "serial0:115200n8");
++	if (ret)
++		printf("RPI: OS console not moved to the GPIO UART: %s\n",
++		       fdt_strerror(ret));
++	else
++		printf("RPI: device tree: OS console on the GPIO UART (serial0)\n");
++}
++
++static void rpi5_fdt_gpio_console(void *blob)
++{
++	const char *alias;
++	char path[128];
++	bool uart = false;
++	int node, ret;
++
++	alias = fdt_get_alias(blob, "uart0");
++	if (!alias || strlen(alias) >= sizeof(path))
++		return;
++	/* the alias points into the tree, which the changes below move */
++	strcpy(path, alias);
++	node = fdt_path_offset(blob, path);
++	if (node < 0)
++		return;
++	/* Raspberry Pi's own tree (the firmware's, handed over by default) */
++	if (!fdt_node_check_compatible(blob, node, "arm,pl011-axi")) {
++		rpi5_fdt_fw_console(blob);
++		return;
++	}
++	if (fdt_node_check_compatible(blob, node, "arm,sbsa-uart"))
++		return;
++
++	if (rpi5_fw_gpio_uart_enabled()) {
++		ret = fdt_setprop_string(blob, node, "status", "okay");
++		if (!ret) {
++			node = fdt_path_offset(blob, "/aliases");
++			ret = node < 0 ? node :
++			      fdt_setprop_string(blob, node, "console", path);
++		}
++		if (ret)
++			printf("RPI: GPIO UART not enabled in the device tree: %s\n",
++			       fdt_strerror(ret));
++		else
++			uart = true;
++	}
++
++	printf("RPI: device tree: GPIO UART %s\n", uart ? "enabled" : "off");
++}
++#endif
++
+ /*
+  * Main console of the operating system, the same rule on every Pi.
+  *
+@@ -764,6 +862,10 @@ int ft_board_setup(void *blob, struct bd_info *bd)
+ 			fdt_simplefb_enable_and_mem_rsv(blob);
+ 	}
+ 
++#ifdef CONFIG_BCM2712
++	rpi5_fdt_gpio_console(blob);
++#endif
++
+ 	rpi_fdt_console_main(blob);
+ 
+ #ifdef CONFIG_EFI_LOADER
+@@ -872,14 +974,10 @@ static void rpi5_gpio_uart_console(struct udevice *rp1)
+ {
+ 	void __iomem *base;
+ 	struct udevice *dev;
+-	ofnode node;
+ 	u32 ctrl;
+ 	int err;
+ 
+-	node = ofnode_get_aliases_node("serial0");
+-	if (!ofnode_valid(node) || !ofnode_is_enabled(node) ||
+-	    !ofnode_device_is_compatible(node, "arm,pl011-axi") ||
+-	    !ofnode_equal(node, ofnode_get_aliases_node("uart0")))
++	if (!rpi5_fw_gpio_uart_enabled())
+ 		return;
+ 
+ 	base = dm_pci_map_bar(rp1, PCI_BASE_ADDRESS_1, 0, 0,

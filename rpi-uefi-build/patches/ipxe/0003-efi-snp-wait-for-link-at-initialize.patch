@@ -1,0 +1,56 @@
+diff --git a/src/interface/efi/efi_snp.c b/src/interface/efi/efi_snp.c
+index be41c0d9..6d83256d 100644
+--- a/src/interface/efi/efi_snp.c
++++ b/src/interface/efi/efi_snp.c
+@@ -26,6 +26,8 @@ FILE_SECBOOT ( PERMITTED );
+ #include <assert.h>
+ #include <byteswap.h>
+ #include <ipxe/netdevice.h>
++#include <ipxe/timer.h>
++#include <ipxe/process.h>
+ #include <ipxe/vlan.h>
+ #include <ipxe/iobuf.h>
+ #include <ipxe/in.h>
+@@ -48,6 +50,34 @@ static LIST_HEAD ( efi_snp_devices );
+ /** Network devices are currently claimed for use by iPXE */
+ static int efi_snp_claimed;
+ 
++/** Maximum time to wait for link-up when the device is opened (in ms)
++ *
++ * The platform's own network boot (PXE, HTTP boot) checks
++ * MediaPresent once, right after initialising the device, unless
++ * the device also provides the Adapter Information Protocol, and
++ * gives up silently if the link is still negotiating.
++ */
++#define EFI_SNP_LINK_WAIT_MS 5000
++
++/**
++ * Wait for link-up after opening the network device
++ *
++ * @v snpdev		SNP device
++ */
++static void efi_snp_wait_link ( struct efi_snp_device *snpdev ) {
++	unsigned int waited;
++
++	for ( waited = 0 ; waited < EFI_SNP_LINK_WAIT_MS ; waited++ ) {
++		if ( netdev_link_ok ( snpdev->netdev ) )
++			break;
++		step();
++		mdelay ( 1 );
++	}
++	DBGC ( snpdev, "SNPDEV %p link is %s after %u ms\n", snpdev,
++	       ( netdev_link_ok ( snpdev->netdev ) ? "up" : "down" ),
++	       waited );
++}
++
+ /** TPL prior to network devices being claimed */
+ static struct efi_saved_tpl efi_snp_saved_tpl;
+ 
+@@ -268,6 +298,7 @@ efi_snp_initialize ( EFI_SIMPLE_NETWORK_PROTOCOL *snp,
+ 		       snpdev, snpdev->netdev->name, strerror ( rc ) );
+ 		goto err_open;
+ 	}
++	efi_snp_wait_link ( snpdev );
+ 	efi_snp_set_state ( snpdev );
+ 
+  err_open:

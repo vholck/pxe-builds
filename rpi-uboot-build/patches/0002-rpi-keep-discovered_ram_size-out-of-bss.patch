@@ -1,0 +1,37 @@
+Subject: [PATCH] rpi: keep discovered_ram_size out of .bss
+
+Commit d19d9e1c064b ("rpi: Add a local get_effective_memsize()", in
+v2026.10) added a static variable that dram_init() assigns before
+relocation. Before relocation .bss overlays .rela.dyn, so the assignment
+overwrites the r_info field of the second relocation entry with the RAM
+size. relocate_code then skips that entry and one pointer in the relocated
+U-Boot keeps its pre-relocation value.
+
+In the Raspberry Pi 5 build the entry belongs to the list head
+efi_runtime_mmio. efi_add_runtime_mmio() then stores a heap pointer through
+the stale pointer, 0xfe8 bytes into the old U-Boot image at 0x80000, which
+is kernel_addr_r: a file loaded there before the first EFI call is
+corrupted. iPXE loaded that way hit an undefined instruction as soon as it
+configured the network. Which pointer is hit depends on the build, so the
+other models are affected in other ways.
+
+Put the variable in .data, like fw_dtb_pointer next to it.
+---
+diff --git a/board/raspberrypi/rpi/rpi.c b/board/raspberrypi/rpi/rpi.c
+index 1da5df9235..38af9487f2 100644
+--- a/board/raspberrypi/rpi/rpi.c
++++ b/board/raspberrypi/rpi/rpi.c
+@@ -39,7 +39,12 @@ DECLARE_GLOBAL_DATA_PTR;
+  */
+ unsigned long __section(".data") fw_dtb_pointer;
+ 
+-static phys_addr_t discovered_ram_size;
++/*
++ * Assigned in dram_init(), which runs before relocation. Until U-Boot has
++ * relocated, .bss overlays the relocation table (.rela.dyn), so keep this
++ * out of .bss: a write there turns a relocation entry into garbage.
++ */
++static phys_addr_t __section(".data") discovered_ram_size;
+ 
+ /* TODO(sjg@chromium.org): Move these to the msg.c file */
+ struct msg_get_arm_mem {

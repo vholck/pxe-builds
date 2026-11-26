@@ -1,0 +1,21 @@
+diff --git a/src/drivers/net/cgem.h b/src/drivers/net/cgem.h
+index 19e466ad..0c92ff07 100644
+--- a/src/drivers/net/cgem.h
++++ b/src/drivers/net/cgem.h
+@@ -120,8 +120,14 @@ struct cgem_descriptor {
+ /** Receive flags */
+ #define CGEM_RX_FL_LEN( x )	( (x) & 0x1fff ) /**< RX packet length */
+ 
+-/** Receive ring length */
+-#define CGEM_NUM_RX_DESC 8
++/** Receive ring length
++ *
++ * 8 descriptors (12kB) are too few when iPXE is the firmware's network
++ * driver (Raspberry Pi 5 under UEFI): HTTPS downloads from the internet
++ * ran at 0.2 to 0.9 MB/s, with 64 at about 30 MB/s. Must be a power of
++ * two.
++ */
++#define CGEM_NUM_RX_DESC 64
+ 
+ /** Length of receive buffers
+  *

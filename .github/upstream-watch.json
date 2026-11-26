@@ -1,0 +1,71 @@
+{
+  "_comment": "Watch list for .github/workflows/upstream-watch.yml. One entry per thing to follow; 'row' names the UPSTREAM-TRACKING.md row it belongs to. Types: patchwork-series, patchwork-search, github-item, github-search, github-branches, github-commits, github-file, github-tags, github-releases. Add an entry with every new tracker row.",
+  "watch": [
+    { "id": "uboot-series-rpi5-pcie", "type": "patchwork-series", "server": "https://patchwork.ozlabs.org", "series": 506901, "row": "U-Boot rpi5 RP1 set" },
+    { "id": "uboot-series-rpi5-almost-complete", "type": "patchwork-series", "server": "https://patchwork.ozlabs.org", "series": 525225, "row": "U-Boot rpi5 RP1 set" },
+    { "id": "uboot-series-rpi5-macb", "type": "patchwork-series", "server": "https://patchwork.ozlabs.org", "series": 525226, "row": "U-Boot rpi5 RP1 set, rpi5/0015, rpi5/0018" },
+    { "id": "uboot-series-rpi-nvme", "type": "patchwork-series", "server": "https://patchwork.ozlabs.org", "series": 534875, "row": "U-Boot rpi5 RP1 set (rpi5/0012)" },
+
+    { "id": "uboot-search-rp1", "type": "patchwork-search", "server": "https://patchwork.ozlabs.org", "project": "uboot", "q": "rp1", "row": "U-Boot rpi5 RP1 set" },
+    { "id": "uboot-search-bcm2712", "type": "patchwork-search", "server": "https://patchwork.ozlabs.org", "project": "uboot", "q": "bcm2712", "row": "U-Boot rpi5 RP1 set, rpi5/0020" },
+    { "id": "uboot-search-rpi5", "type": "patchwork-search", "server": "https://patchwork.ozlabs.org", "project": "uboot", "q": "rpi5", "row": "U-Boot rpi5 RP1 set" },
+    { "id": "uboot-search-raspberry", "type": "patchwork-search", "server": "https://patchwork.ozlabs.org", "project": "uboot", "q": "raspberry", "row": "U-Boot, all Pi rows" },
+    { "id": "uboot-search-macb", "type": "patchwork-search", "server": "https://patchwork.ozlabs.org", "project": "uboot", "q": "macb", "row": "rpi5/0015, rpi5/0018" },
+    { "id": "uboot-search-bcmgenet", "type": "patchwork-search", "server": "https://patchwork.ozlabs.org", "project": "uboot", "q": "bcmgenet", "row": "U-Boot 0001" },
+    { "id": "uboot-search-pl01x", "type": "patchwork-search", "server": "https://patchwork.ozlabs.org", "project": "uboot", "q": "pl01", "row": "U-Boot 0005" },
+    { "id": "uboot-search-sdhost", "type": "patchwork-search", "server": "https://patchwork.ozlabs.org", "project": "uboot", "q": "sdhost", "row": "U-Boot 0006" },
+    { "id": "uboot-search-sdhci", "type": "patchwork-search", "server": "https://patchwork.ozlabs.org", "project": "uboot", "q": "sdhci", "row": "U-Boot 0003" },
+    { "id": "uboot-search-proxydhcp", "type": "patchwork-search", "server": "https://patchwork.ozlabs.org", "project": "uboot", "q": "proxydhcp", "row": "U-Boot 0004" },
+
+    { "id": "linux-arm-search-rp1", "type": "patchwork-search", "server": "https://patchwork.kernel.org", "project": "linux-arm-kernel", "q": "rp1", "row": "Linux RP1 UART0 node" },
+    { "id": "linux-dt-search-rp1", "type": "patchwork-search", "server": "https://patchwork.kernel.org", "project": "devicetree", "q": "rp1", "row": "Linux RP1 UART0 node" },
+    { "id": "linux-arm-search-bcm2712", "type": "patchwork-search", "server": "https://patchwork.kernel.org", "project": "linux-arm-kernel", "q": "bcm2712", "row": "Linux RP1 UART0 node" },
+
+    { "id": "siderolabs-pr88", "type": "github-item", "repo": "siderolabs/sbc-raspberrypi", "number": 88, "row": "U-Boot rpi5 RP1 set (our source)" },
+    { "id": "rpi5-uefi-issue34", "type": "github-item", "repo": "NumberOneGit/rpi5-uefi", "number": 34, "row": "EDK2 rpi5/0001 + ipxe/0002 (native Ethernet driver)" },
+
+    { "id": "rpi5-uefi-all", "type": "github-search", "q": "repo:NumberOneGit/rpi5-uefi", "row": "EDK2 Pi 5 rows" },
+    { "id": "pftf-all", "type": "github-search", "q": "repo:pftf/RPi4", "row": "EDK2 Pi 3/4 rows" },
+    { "id": "ipxe-rp1", "type": "github-search", "q": "repo:ipxe/ipxe rp1 OR cgem OR \"raspberry pi\" OR bcm2712", "row": "iPXE ipxe/0002, 0004" },
+    { "id": "ipxe-nfs", "type": "github-search", "q": "repo:ipxe/ipxe nfs", "row": "iPXE pxe patch 0003" },
+    { "id": "ipxe-nfs-step-no-wait", "type": "github-file", "repo": "ipxe/ipxe", "path": "src/net/oncrpc/nfs_open.c", "pattern": "char\\s+\\*path_component;\\s*if \\( ! xfer_window \\( &nfs->nfs_intf \\) \\)", "while_matching": "upstream nfs_step() still sends LOOKUP before the NFS connection is open: our pxe patch 0003 is still needed", "row": "iPXE pxe patch 0003" },
+    { "id": "ipxe-fdt", "type": "github-search", "q": "repo:ipxe/ipxe fdt OR dtb OR \"device tree\" OR DT_FIXUP OR local-mac-address", "row": "iPXE pxe patches 0001, 0002" },
+    { "id": "dracut-rp1", "type": "github-search", "q": "repo:dracut-ng/dracut rp1 OR \"raspberry pi 5\"", "row": "Other: CoreOS extra initrd" },
+    { "id": "fcos-rp1", "type": "github-search", "q": "repo:coreos/fedora-coreos-tracker rp1 OR rpi5 OR \"raspberry pi 5\"", "row": "Other: CoreOS extra initrd" },
+    { "id": "fcos-chronyd", "type": "github-search", "q": "repo:coreos/fedora-coreos-tracker chronyd authselect", "row": "Other: chronyd race" },
+    { "id": "moby-netns-restart", "type": "github-search", "q": "repo:moby/moby \"cannot join network namespace\" OR \"network_mode container\" restart", "row": "Other: pxe start-retry" },
+    { "id": "edk2-platforms-rpi5", "type": "github-search", "q": "repo:tianocore/edk2-platforms rpi5 OR \"raspberry pi 5\" OR bcm2712", "row": "EDK2 Pi 5 port" },
+
+    { "id": "rpi5-uefi-branches", "type": "github-branches", "repo": "NumberOneGit/rpi5-uefi", "row": "EDK2 Pi 5 rows" },
+    { "id": "siderolabs-branches", "type": "github-branches", "repo": "siderolabs/sbc-raspberrypi", "row": "U-Boot rpi5 RP1 set" },
+    { "id": "pftf-master", "type": "github-commits", "repo": "pftf/RPi4", "branch": "master", "row": "EDK2 Pi 3/4 rows" },
+
+    { "id": "uboot-bcmgenet-rxid", "type": "github-file", "repo": "u-boot/u-boot", "path": "drivers/net/bcmgenet.c", "pattern": "PHY_INTERFACE_MODE_RGMII_RXID\\)\\s*\\n\\s*setbits_32\\([^;]*ID_MODE_DIS", "while_matching": "upstream still sets ID_MODE_DIS for rgmii-rxid: our 0001 is still needed", "row": "U-Boot 0001" },
+    { "id": "uboot-pl01x-tstc", "type": "github-file", "repo": "u-boot/u-boot", "path": "drivers/serial/serial_pl01x.c", "pattern": "static int pl01x_tstc\\(struct pl01x_regs \\*regs\\)\\s*\\{\\s*schedule\\(\\);\\s*return !\\(readl\\(&regs->fr\\) & UART_PL01x_FR_RXFE\\);", "while_matching": "upstream tstc still reports error bytes: our 0005 is still needed", "row": "U-Boot 0005" },
+    { "id": "uboot-sdhost-failed-cmd", "type": "github-file", "repo": "u-boot/u-boot", "path": "drivers/mmc/bcm2835_sdhost.c", "pattern": "WARN_ON\\(host->cmd\\);", "while_matching": "upstream sdhost unchanged around the failed-command WARN_ON: our 0006 is probably still needed (check the driver when this flips)", "row": "U-Boot 0006" },
+    { "id": "linux-rp1-uart", "type": "github-file", "repo": "torvalds/linux", "path": "arch/arm64/boot/dts/broadcom/rp1-common.dtsi", "pattern": "serial@|uart0|pl011", "while_matching": "Linux has an RP1 UART node: our dts/rp1-uart0.dtsi may go", "row": "Linux RP1 UART0 node" },
+    { "id": "pftf-config", "type": "github-file", "repo": "pftf/RPi4", "path": "config.txt", "pattern": "device_tree_address=0x3e0000", "hash": true, "while_matching": "pftf config.txt has the Pi 4 tree address we use", "row": "UEFI config.txt" },
+
+    { "id": "ipxe-efi-fdt-no-fixup", "type": "github-file", "repo": "ipxe/ipxe", "path": "src/interface/efi/efi_fdt.c", "pattern": "fdt_create \\( &efi_fdt_installed, cmdline, 0, 0 \\) \\) != 0 \\) \\{\\s*DBGC[^;]*;\\s*goto err_create;\\s*\\}\\s*/\\* Install table \\*/", "while_matching": "upstream installs a loaded tree without a firmware fixup call: our pxe patch 0002 is still needed", "row": "iPXE pxe patches 0001, 0002" },
+
+    { "id": "uboot-tags", "type": "github-tags", "repo": "u-boot/u-boot", "row": "U-Boot pin v2026.10" },
+    { "id": "ipxe-tags", "type": "github-tags", "repo": "ipxe/ipxe", "row": "iPXE pin" },
+    { "id": "dnsmasq-image-tags", "type": "github-tags", "repo": "poseidon/dnsmasq", "row": "Other: dnsmasq 2.91 pin" },
+    { "id": "matchbox-releases", "type": "github-releases", "repo": "poseidon/matchbox", "row": "Other: Matchbox main build" },
+    { "id": "ganesha-nofile", "type": "github-search", "q": "repo:nfs-ganesha/nfs-ganesha repo:nfs-ganesha/ntirpc RLIMIT_NOFILE OR nofile OR \"hook failed\"", "row": "Other: nfs-ganesha open-file limit" },
+    { "id": "ganesha-udp", "type": "github-search", "q": "repo:nfs-ganesha/nfs-ganesha repo:nfs-ganesha/ntirpc svc_dg_rendezvous OR \"Bad message sa_family\"", "row": "Other: nfs-ganesha UDP off" },
+    { "id": "libreelec-kernel-ipconfig", "type": "github-search", "q": "repo:LibreELEC/LibreELEC.tv kernel_ipconfig OR udhcpc OR \"dhcp lease\" OR \"nfs dhcp\"", "row": "Other: LibreELEC DHCP renewal" },
+    { "id": "libreelec-connman-ipconfig", "type": "github-file", "repo": "LibreELEC/LibreELEC.tv", "path": "packages/network/connman/system.d/connman.service", "pattern": "ConditionPathExists=!/dev/\\.kernel_ipconfig", "while_matching": "connman still does not start after ip=: our netboot-dhcp-renew service is still needed", "row": "Other: LibreELEC DHCP renewal" },
+    { "id": "pftf-releases", "type": "github-releases", "repo": "pftf/RPi4", "row": "EDK2 Pi 3/4 pin" },
+    { "id": "rpi5-uefi-releases", "type": "github-releases", "repo": "NumberOneGit/rpi5-uefi", "row": "EDK2 Pi 5 pin" },
+    { "id": "tfa-tags", "type": "github-tags", "repo": "ARM-software/arm-trusted-firmware", "row": "TF-A pin for the Pi 5 (RPI5_TFA_TAG)" },
+    { "id": "linux-tags", "type": "github-tags", "repo": "torvalds/linux", "row": "Linux device trees pin (RPI_DT_TAG)" },
+    { "id": "linux-series-rp1-pwm", "type": "patchwork-series", "server": "https://patchwork.kernel.org", "series": 1221162, "row": "Linux device trees pin (RPI_DT_TAG)" },
+    { "id": "linux-series-bcm2712-dma-audio", "type": "patchwork-series", "server": "https://patchwork.kernel.org", "series": 1219724, "row": "Linux device trees pin (RPI_DT_TAG)" },
+    { "id": "linux-series-bcm2712-d0-rtc", "type": "patchwork-series", "server": "https://patchwork.kernel.org", "series": 1199289, "row": "Linux device trees pin (RPI_DT_TAG)" },
+    { "id": "linux-arm-search-pwm-fan", "type": "patchwork-search", "server": "https://patchwork.kernel.org", "project": "linux-arm-kernel", "q": "pwm-fan", "row": "Linux device trees pin (RPI_DT_TAG)" },
+    { "id": "rpi-firmware-master", "type": "github-commits", "repo": "raspberrypi/firmware", "branch": "master", "row": "Raspberry Pi firmware pin" },
+    { "id": "curl-releases", "type": "github-releases", "repo": "curl/curl", "row": "curl image pin" },
+    { "id": "nix-releases", "type": "github-releases", "repo": "NixOS/nix", "row": "nixos/nix image pin" }
+  ]
+}

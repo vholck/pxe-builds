@@ -1,0 +1,123 @@
+diff --git a/Platform/RaspberryPi/Drivers/FdtDxe/FdtDxe.c b/Platform/RaspberryPi/Drivers/FdtDxe/FdtDxe.c
+index 7d7fe7b..4032e6e 100644
+--- a/Platform/RaspberryPi/Drivers/FdtDxe/FdtDxe.c
++++ b/Platform/RaspberryPi/Drivers/FdtDxe/FdtDxe.c
+@@ -431,6 +431,91 @@ SyncPcie (
+   return EFI_SUCCESS;
+ }
+ 
++/** Vendor GUID of the FdtFile variable (the same in rpi-uboot-build) */
++STATIC EFI_GUID mFdtFileVarGuid = {
++  0xeedf58fc, 0x1b9b, 0x4ab0, { 0x8b, 0x6b, 0x95, 0x4d, 0x79, 0xd6, 0xb0, 0x52 }
++};
++
++STATIC EFI_RUNTIME_SERVICES  *mFdtFileRt;
++
++/**
++  Path of the board's upstream Linux device tree, in the layout
++  distributions use; the same names as U-Boot's ${fdtfile}
++  (board/raspberrypi/rpi/rpi.c).
++
++  @param  Revision   Raspberry Pi board revision code
++
++  @return Path, or NULL for a board without one
++**/
++STATIC
++CONST CHAR8 *
++UpstreamFdtFile (
++  IN UINT32 Revision
++  )
++{
++  if ((Revision & BIT23) == 0) {
++    return NULL;                  // old-style revision codes: Pi 1 and 2 only
++  }
++  switch ((Revision >> 4) & 0xFF) {
++  case 0x08: return "broadcom/bcm2837-rpi-3-b.dtb";
++  case 0x0A: return "broadcom/bcm2837-rpi-cm3.dtb";
++  case 0x0D: return "broadcom/bcm2837-rpi-3-b-plus.dtb";
++  case 0x0E: return "broadcom/bcm2837-rpi-3-a-plus.dtb";
++  case 0x10: return "broadcom/bcm2837-rpi-cm3.dtb";
++  case 0x11: return "broadcom/bcm2711-rpi-4-b.dtb";
++  case 0x12: return "broadcom/bcm2837-rpi-zero-2-w.dtb";
++  case 0x13: return "broadcom/bcm2711-rpi-400.dtb";
++  case 0x14: return "broadcom/bcm2711-rpi-cm4.dtb";
++  case 0x17: return ((Revision & 0xF) == 1) ? "broadcom/bcm2712-d-rpi-5-b.dtb"
++                                             : "broadcom/bcm2712-rpi-5-b.dtb";
++  case 0x18: return "broadcom/bcm2712-rpi-cm5-cm5io.dtb";
++  case 0x19: return "broadcom/bcm2712-rpi-500.dtb";
++  case 0x1A: return "broadcom/bcm2712-rpi-cm5l-cm5io.dtb";
++  default:   return NULL;
++  }
++}
++
++/**
++  Publish the UEFI variable FdtFile (boot services only): the path of the
++  board's upstream Linux device tree, so a loader (iPXE:
++  ${efi/FdtFile:string}) can load the tree an OS needs with `fdt`. Runs at
++  ReadyToBoot, whatever the system table mode, when variable services are
++  certainly up.
++
++  @param  Event     The ReadyToBoot event
++  @param  Context   Unused
++**/
++STATIC
++VOID
++EFIAPI
++PublishFdtFile (
++  IN EFI_EVENT  Event,
++  IN VOID       *Context
++  )
++{
++  RASPBERRY_PI_FIRMWARE_PROTOCOL  *Fw;
++  UINT32                          Revision;
++  CONST CHAR8                     *Name;
++  EFI_STATUS                      Status;
++
++  gBS->CloseEvent (Event);
++  Status = gBS->LocateProtocol (&gRaspberryPiFirmwareProtocolGuid, NULL,
++                  (VOID**)&Fw);
++  if (EFI_ERROR (Status) || EFI_ERROR (Fw->GetModelRevision (&Revision))) {
++    DEBUG ((DEBUG_ERROR, "FdtFile: no board revision\n"));
++    return;
++  }
++  Name = UpstreamFdtFile (Revision);
++  if (Name == NULL) {
++    DEBUG ((DEBUG_INFO, "FdtFile: no upstream tree for revision 0x%x\n", Revision));
++    return;
++  }
++  Status = mFdtFileRt->SetVariable (L"FdtFile", &mFdtFileVarGuid,
++                         EFI_VARIABLE_BOOTSERVICE_ACCESS,
++                         AsciiStrLen (Name), (VOID *)Name);
++  DEBUG ((DEBUG_INFO, "FdtFile: %a: %r\n", Name, Status));
++}
++
+ /**
+   @param  ImageHandle   of the loaded driver
+   @param  SystemTable   Pointer to the System Table
+@@ -451,6 +536,14 @@ FdtDxeInitialize (
+   EFI_STATUS Status;
+   UINTN      FdtSize;
+   VOID       *FdtImage = NULL;
++  EFI_EVENT  FdtFileEvent;
++
++  mFdtFileRt = SystemTable->RuntimeServices;
++  Status = gBS->CreateEventEx (EVT_NOTIFY_SIGNAL, TPL_CALLBACK, PublishFdtFile,
++                  NULL, &gEfiEventReadyToBootGuid, &FdtFileEvent);
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, "FdtFile: no ReadyToBoot event: %r\n", Status));
++  }
+ 
+   if (PcdGet32 (PcdSystemTableMode) != SYSTEM_TABLE_MODE_BOTH &&
+       PcdGet32 (PcdSystemTableMode) != SYSTEM_TABLE_MODE_DT) {
+diff --git a/Platform/RaspberryPi/Drivers/FdtDxe/FdtDxe.inf b/Platform/RaspberryPi/Drivers/FdtDxe/FdtDxe.inf
+index 90e138a..15ba64e 100644
+--- a/Platform/RaspberryPi/Drivers/FdtDxe/FdtDxe.inf
++++ b/Platform/RaspberryPi/Drivers/FdtDxe/FdtDxe.inf
+@@ -36,6 +36,7 @@
+ 
+ [Guids]
+   gFdtTableGuid
++  gEfiEventReadyToBootGuid
+ 
+ [Protocols]
+   gRaspberryPiFirmwareProtocolGuid              ## CONSUMES

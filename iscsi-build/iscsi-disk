@@ -1,0 +1,295 @@
+#!/bin/sh
+# Manage the network disks of the iscsi image. Run it inside the running
+# container:
+#   docker exec <iscsi container> iscsi-disk <command> ...
+#
+#   list                  the bases and the machine disks: size (apparent and
+#                         used on the host), target name, connected machines
+#   new    <name> <size>  an empty disk (sparse, e.g. 20G), for an OS's own
+#                         installer
+#   copy   <base> <name>  copy base/<base>.raw to the disk <name> (fails if it
+#                         exists)
+#   reset  <base> <name>  delete the disk <name> and copy it again from
+#                         <base>
+#   delete [-f] <name>    delete the disk <name>
+#   save   <name> <base>  copy the disk <name> to base/<base>.raw as a new base
+#                         (fails if it exists): boot a machine from its own
+#                         disk, install and set up what you want, power it
+#                         off, save
+#
+# Each disk disks/<name>.raw is served as the iSCSI target
+# <ISCSI_IQN>:<name> (ISCSI_IQN default iqn.2026-11.pxe.stack) with the disk
+# at LUN 1, to the addresses in ISCSI_CLIENTS (default: LAN_SUBNET). iPXE:
+#   sanboot iscsi:<server>:::1:<ISCSI_IQN>:<name>
+# Names: lower-case letters, digits, '.' and '-' (iSCSI names have no
+# capitals or '_'), e.g. debian-02-00-00-00-00-01.
+# Disk files are sparse: a disk uses on the host only what was written to it.
+# The copy is a full one (instant only on a host file system with reflinks).
+# A copy keeps the base's identity (machine ID, SSH host keys) if the base
+# has one: before save, clear them on the machine if copies should get their
+# own (e.g. "truncate -s 0 /etc/machine-id; rm /etc/ssh/ssh_host_*").
+# Power the machine off before reset, delete or save: these refuse while a
+# machine is connected to the disk. A machine that was switched off never
+# says goodbye (its root is on the disk until the last moment), so the server
+# counts it as connected until its pings stay unanswered, up to 75 s. The
+# commands wait that long for the connection to go before they refuse.
+# delete -f does not wait: it closes the connection, and a machine that is
+# still running loses its disk. Such a machine keeps trying to get its disk
+# back: a new disk made under the same name while it runs is taken by it and
+# damaged (it writes what it still has in memory). That is why reset has no
+# -f.
+set -eu
+
+DATA=/srv/iscsi
+BASE=$DATA/base
+DISKS=$DATA/disks
+PUID=${PUID:-500}
+PGID=${PGID:-500}
+IQN=$(printf '%s' "${ISCSI_IQN:-iqn.2026-11.pxe.stack}" | tr '[:upper:]' '[:lower:]')
+CLIENTS=${ISCSI_CLIENTS:-${LAN_SUBNET:?set LAN_SUBNET (or ISCSI_CLIENTS)}}
+
+die() { echo "iscsi-disk: $*" >&2; exit 1; }
+
+check_name() {
+  case "$1" in
+    ''|.*|-*) die "invalid name '$1' (must not be empty or start with '.' or '-')" ;;
+  esac
+  printf '%s' "$1" | grep -Eq '^[a-z0-9.-]+$' \
+    || die "invalid name '$1' (lower-case letters, digits, . and - only)"
+}
+
+tgt() { tgtadm --lld iscsi "$@"; }
+
+# Is tgtd running (service on)?
+tgt_up() { tgt --op show --mode sys >/dev/null 2>&1; }
+
+# tid of the target with this name, empty if there is none
+tid_of() {
+  tgt --op show --mode target | awk -v t="$1" '$1 == "Target" && $3 == t { sub(":", "", $2); print $2 }'
+}
+
+# Lowest target id not in use. tids are runtime numbers only: a disk's
+# target is found by its name.
+free_tid() {
+  used=$(tgt --op show --mode target | awk '$1 == "Target" { sub(":", "", $2); print $2 }')
+  i=1
+  while printf '%s\n' "$used" | grep -qx "$i"; do i=$((i + 1)); done
+  echo "$i"
+}
+
+# Addresses of the machines connected to the target (one per line)
+connected() {
+  tgt --op show --mode conn --tid "$1" 2>/dev/null | awk '$1 == "IP" && $2 == "Address:" { print $3 }'
+}
+
+publish() {
+  n=$1 f=$DISKS/$1.raw
+  tgt_up || { echo "iscsi-disk: service off (ISCSI_ENABLED=0): $n not published"; return 0; }
+  [ -n "$(tid_of "$IQN:$n")" ] && return 0
+  tid=$(free_tid)
+  tgt --op new --mode target --tid "$tid" -T "$IQN:$n" || return 1
+  # Serial number and device ID from the name, not from the runtime tid, so a
+  # disk looks the same to its machine after every restart. Thin
+  # provisioning: blocks the machine discards (TRIM) become holes in the
+  # sparse file again.
+  id=$(printf '%s' "$n" | sha256sum | cut -c1-16)
+  if ! { tgt --op new --mode logicalunit --tid "$tid" --lun 1 -b "$f" \
+         && tgt --op update --mode logicalunit --tid "$tid" --lun 1 \
+              --params "scsi_id=$id,scsi_sn=$id,thin_provisioning=1"; }; then
+    tgt --op delete --mode target --tid "$tid" || true
+    return 1
+  fi
+  # Pings (NOP-In) every 15 s; a connection that misses 4 is closed. Without
+  # them a machine that was switched off, and the session iPXE leaves behind
+  # when the OS takes over, count as connected for over half an hour (TCP
+  # keepalive), and delete/reset refuse. iPXE does not answer pings: its
+  # session closes after a minute and iPXE opens a new one if it still needs
+  # the disk.
+  if ! { tgt --op update --mode target --tid "$tid" -n nop_interval -v 15 \
+         && tgt --op update --mode target --tid "$tid" -n nop_count -v 4; }; then
+    tgt --op delete --mode target --tid "$tid" || true
+    return 1
+  fi
+  for c in $(printf '%s' "$CLIENTS" | tr ',' ' '); do
+    # tgt takes any text here and then lets nobody in: check it is an IPv4 or
+    # IPv6 address or network
+    if ! printf '%s' "$c" | grep -Eq '^(([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?|[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*(/[0-9]{1,3})?)$' \
+       || ! tgt --op bind --mode target --tid "$tid" -I "$c"; then
+      tgt --op delete --mode target --tid "$tid" || true
+      echo "iscsi-disk: cannot allow '$c' (ISCSI_CLIENTS: addresses or networks like 192.0.2.0/24)" >&2
+      return 1
+    fi
+  done
+  echo "iscsi-disk: $n published as $IQN:$n (LUN 1)"
+}
+
+# Wait until no machine is connected to target $1 (disk $2), at most
+# IDLE_WAIT seconds: the time the server needs to notice that a machine was
+# switched off (nop_interval x nop_count in publish, plus one interval).
+# Fails if one is still connected then.
+IDLE_WAIT=80
+wait_idle() {
+  who=$(connected "$1" | tr '\n' ' ')
+  [ -n "$who" ] || return 0
+  echo "iscsi-disk: disk $2 is connected to ${who% }; waiting up to $IDLE_WAIT s for the server to drop the connection (it does if the machine is off)" >&2
+  t=0
+  while [ "$t" -lt "$IDLE_WAIT" ]; do
+    sleep 5; t=$((t + 5))
+    who=$(connected "$1" | tr '\n' ' ')
+    [ -n "$who" ] || return 0
+  done
+  return 1
+}
+
+# Take the target of disk $1 away. Waits for a connection to go and fails if
+# a machine stays connected; with FORCE=1 the connections are closed.
+FORCE=0
+unpublish() {
+  n=$1
+  tgt_up || return 0
+  tid=$(tid_of "$IQN:$n")
+  [ -n "$tid" ] || return 0
+  if [ "$FORCE" != 1 ] && ! wait_idle "$tid" "$n"; then
+    who=$(connected "$tid" | tr '\n' ' ')
+    die "disk $n is in use by ${who% }: power the machine off first (or -f to close its connection)"
+  fi
+  # Offline first: no new logins while it goes.
+  tgt --op update --mode target --tid "$tid" -n state -v offline
+  if [ "$FORCE" = 1 ]; then
+    who=$(connected "$tid" | tr '\n' ' ')
+    [ -z "$who" ] || echo "iscsi-disk: closing the connection of ${who% }" >&2
+    tgt --op delete --force --mode target --tid "$tid" && return 0
+  else
+    tgt --op delete --mode target --tid "$tid" 2>/dev/null && return 0
+  fi
+  tgt --op update --mode target --tid "$tid" -n state -v ready || true
+  die "disk $n is in use: power the machine off first"
+}
+
+# Wait for a connection to go and refuse if a machine stays connected (for
+# save: a copy of a disk in use would be a damaged one, so there is no -f)
+check_idle() {
+  tgt_up || return 0
+  tid=$(tid_of "$IQN:$1")
+  [ -n "$tid" ] || return 0
+  if ! wait_idle "$tid" "$1"; then
+    who=$(connected "$tid" | tr '\n' ' ')
+    die "disk $1 is in use by ${who% }: power the machine off first"
+  fi
+}
+
+# Sparse copy via a .partial file, owned by the host user
+copy_file() {
+  rm -f "$2.partial"
+  cp --sparse=always --reflink=auto "$1" "$2.partial" || { rm -f "$2.partial"; die "copy failed"; }
+  chown "$PUID:$PGID" "$2.partial"
+  mv "$2.partial" "$2"
+}
+
+sizes() {
+  printf '%s, %s used' "$(du -h --apparent-size "$1" | cut -f1)" "$(du -h "$1" | cut -f1)"
+}
+
+copy_disk() {
+  b=$1 n=$2
+  check_name "$b"; check_name "$n"
+  [ -f "$BASE/$b.raw" ] || die "no base $BASE/$b.raw"
+  [ -e "$DISKS/$n.raw" ] && die "disk $DISKS/$n.raw exists"
+  echo "iscsi-disk: copying base $b to disk $n ..."
+  copy_file "$BASE/$b.raw" "$DISKS/$n.raw"
+  echo "iscsi-disk: disk $n ready ($(sizes "$DISKS/$n.raw"))"
+  publish "$n" || die "disk $n made but not published"
+}
+
+delete_disk() {
+  check_name "$1"
+  unpublish "$1"
+  rm -f "$DISKS/$1.raw.partial"
+  if [ -e "$DISKS/$1.raw" ]; then
+    rm -f "$DISKS/$1.raw"
+    echo "iscsi-disk: disk $1 deleted"
+  else
+    echo "iscsi-disk: no disk $1"
+  fi
+}
+
+# Changing commands one at a time (tid allocation, files)
+lock() { exec 9>/run/iscsi-disk.lock; flock 9; }
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  delete) if [ "${1:-}" = -f ]; then FORCE=1; shift; fi ;;
+esac
+case "$cmd" in
+  list)
+    echo "bases ($BASE):"
+    for f in "$BASE"/*.raw; do
+      [ -f "$f" ] || continue
+      n=${f##*/}; echo "  ${n%.raw}  ($(sizes "$f"))"
+    done
+    echo "disks ($DISKS):"
+    for f in "$DISKS"/*.raw; do
+      [ -f "$f" ] || continue
+      n=${f##*/}; n=${n%.raw}
+      state="not published"
+      if tgt_up; then
+        tid=$(tid_of "$IQN:$n")
+        if [ -n "$tid" ]; then
+          who=$(connected "$tid" | tr '\n' ' ')
+          state="$IQN:$n, ${who:+in use by }${who:-not connected}"
+          state=${state% }
+        fi
+      else
+        state="service off"
+      fi
+      echo "  $n  ($(sizes "$f"))  $state"
+    done ;;
+  new)
+    [ $# -eq 2 ] || die "usage: iscsi-disk new <name> <size>"
+    check_name "$1"; lock
+    f=$DISKS/$1.raw
+    [ -e "$f" ] && die "disk $f exists"
+    qemu-img create -q -f raw "$f.partial" "$2" || { rm -f "$f.partial"; die "invalid size '$2' (e.g. 20G)"; }
+    chown "$PUID:$PGID" "$f.partial"
+    mv "$f.partial" "$f"
+    echo "iscsi-disk: empty disk $1 ready ($(sizes "$f"))"
+    publish "$1" || die "disk $1 made but not published" ;;
+  copy)
+    [ $# -eq 2 ] || die "usage: iscsi-disk copy <base> <name>"
+    lock; copy_disk "$1" "$2" ;;
+  reset)
+    [ $# -eq 2 ] || die "usage: iscsi-disk reset <base> <name>"
+    check_name "$1"; check_name "$2"; lock
+    [ -f "$BASE/$1.raw" ] || die "no base $BASE/$1.raw"
+    delete_disk "$2"
+    copy_disk "$1" "$2" ;;
+  delete)
+    [ $# -eq 1 ] || die "usage: iscsi-disk delete [-f] <name>"
+    lock; delete_disk "$1" ;;
+  save)
+    [ $# -eq 2 ] || die "usage: iscsi-disk save <name> <base>"
+    check_name "$1"; check_name "$2"; lock
+    [ -f "$DISKS/$1.raw" ] || die "no disk $DISKS/$1.raw"
+    [ -e "$BASE/$2.raw" ] && die "base $BASE/$2.raw exists"
+    check_idle "$1"
+    echo "iscsi-disk: copying disk $1 to base $2 ..."
+    copy_file "$DISKS/$1.raw" "$BASE/$2.raw"
+    echo "iscsi-disk: base $2 ready ($(sizes "$BASE/$2.raw"))" ;;
+  publish-all)
+    # For start.sh: a target for every disk
+    lock; rc=0
+    for f in "$DISKS"/*.raw; do
+      [ -f "$f" ] || continue
+      n=${f##*/}; n=${n%.raw}
+      if ! (check_name "$n") 2>/dev/null; then
+        echo "iscsi-disk: $f not published: invalid name (lower-case letters, digits, . and - only)" >&2
+        rc=1; continue
+      fi
+      publish "$n" || rc=1
+    done
+    exit "$rc" ;;
+  *)
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
+    [ -z "$cmd" ] || exit 2 ;;
+esac

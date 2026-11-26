@@ -1,0 +1,44 @@
+name: Upstream watch
+
+# Follows upstream work that overlaps this repository's patches, beyond master:
+# posted patch series and their review state (U-Boot and Linux Patchwork),
+# keyword searches for new series, PRs and issues in the projects we build
+# from, branches of the forks we use, master files that tell whether a patch
+# is still needed, and new releases. The list is .github/upstream-watch.json;
+# the record it feeds is UPSTREAM-TRACKING.md.
+#
+# Reports go to one issue labelled "upstream-watch" in this repository (it also
+# holds the state): a comment per change and the label "upstream-change" until
+# someone has updated the tracker. Nothing is committed, built or deployed.
+
+on:
+  schedule:
+    - cron: '41 4 * * *'
+  push:
+    branches: [main]
+    paths:
+      - .github/upstream-watch.json
+      - .github/scripts/upstream-watch.mjs
+      - .github/workflows/upstream-watch.yml
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check upstream
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .github/scripts/upstream-watch.mjs

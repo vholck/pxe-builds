@@ -1,0 +1,29 @@
+Subject: [PATCH] net: bootp: use the DHCP server's boot server when no ProxyDHCP answers
+
+With SERVERIP_FROM_PROXYDHCP the boot server and file name are taken only
+from a ProxyDHCP answer (a packet without an address for the client). On a
+network where the DHCP server itself names the boot server, serverip stays
+empty and nothing can be loaded.
+
+Take the parameters from the DHCP server's own answer when no ProxyDHCP
+server has set a boot server. A ProxyDHCP answer still takes precedence.
+---
+diff --git a/net/bootp.c b/net/bootp.c
+index f0dc329..0da2ad0 100644
+--- a/net/bootp.c
++++ b/net/bootp.c
+@@ -183,6 +183,14 @@ static void store_net_params(struct bootp_hdr *bp)
+ {
+ #if !defined(CONFIG_SERVERIP_FROM_PROXYDHCP)
+ 	store_bootp_params(bp);
++#else
++	/*
++	 * No ProxyDHCP server has named a boot server: take the one the DHCP
++	 * server itself gives, as a build without SERVERIP_FROM_PROXYDHCP does.
++	 * A ProxyDHCP answer, also a late one, still takes precedence.
++	 */
++	if (!net_server_ip.s_addr)
++		store_bootp_params(bp);
+ #endif
+ 	net_copy_ip(&net_ip, &bp->bp_yiaddr);
+ }

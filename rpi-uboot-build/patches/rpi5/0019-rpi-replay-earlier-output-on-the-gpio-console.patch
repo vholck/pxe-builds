@@ -1,0 +1,103 @@
+Subject: [PATCH] rpi: replay the earlier output on the GPIO console
+
+The console on GPIO 14 and 15 of a Raspberry Pi 5 can only be started
+after the RP1 is up, so what U-Boot printed before that was seen on the
+debug UART only.
+
+Record the console output from relocation on (CONFIG_CONSOLE_RECORD) and
+print it on the GPIO console when that console is started, between two
+marker lines that say it is a replay. The first marker carries the
+version string, because the banner is printed before relocation and is
+not recorded. Recording stops after the replay.
+---
+diff --git a/board/raspberrypi/rpi/rpi.c b/board/raspberrypi/rpi/rpi.c
+index dc3ba995..6c6618dc 100644
+--- a/board/raspberrypi/rpi/rpi.c
++++ b/board/raspberrypi/rpi/rpi.c
+@@ -24,6 +24,10 @@
+ #include <dm/root.h>
+ #include <asm/io.h>
+ #include <pci.h>
++#include <membuf.h>
++#include <stdio_dev.h>
++#include <version_string.h>
++#include <linux/delay.h>
+ #include <broadcom/bcm_board_types.h>
+ #ifdef CONFIG_ARM64
+ #include <asm/armv8/mmu.h>
+@@ -743,6 +747,41 @@ static void rpi5_console_add(const char *var)
+ 	env_set(var, buf);
+ }
+ 
++/*
++ * Print on the new console what U-Boot has printed since relocation, which
++ * until now went to the debug UART only. The text was recorded by the console
++ * recorder (CONFIG_CONSOLE_RECORD); it is marked as a replay because it is
++ * not printed at the time it happened. What U-Boot printed before relocation
++ * (the banner, the memory size) is not recorded, so the version is given in
++ * the first marker line.
++ */
++#ifdef CONFIG_CONSOLE_RECORD
++static void rpi5_console_replay(void)
++{
++	struct stdio_dev *sdev = stdio_get_by_name(RP1_UART0_NAME);
++	struct membuf *out = (struct membuf *)&gd->console_out;
++	int ch;
++
++	if (!(gd->flags & GD_FLG_RECORD))
++		return;
++	/* The recorder has done its job; nothing else here uses it. */
++	gd->flags &= ~GD_FLG_RECORD;
++	if (!sdev || !sdev->putc || !sdev->puts)
++		return;
++
++	sdev->puts(sdev, "\n--- ");
++	sdev->puts(sdev, version_string);
++	sdev->puts(sdev, ": earlier output, replayed ---\n");
++	while ((ch = membuf_getbyte(out)) != -1)
++		sdev->putc(sdev, ch);
++	sdev->puts(sdev, "--- end of replay, live from here ---\n");
++}
++#else
++static void rpi5_console_replay(void)
++{
++}
++#endif
++
+ static void rpi5_gpio_uart_console(struct udevice *rp1)
+ {
+ 	void __iomem *base;
+@@ -788,11 +827,19 @@ static void rpi5_gpio_uart_console(struct udevice *rp1)
+ 		return;
+ 	}
+ 
+-	/* The UART is running and its TX output idle: connect the pins. */
+-	writel(RP1_PAD_UART_RX, base + RP1_PADS_BANK0_OFFSET + RP1_PAD(15));
+-	writel(RP1_PAD_UART_TX, base + RP1_PADS_BANK0_OFFSET + RP1_PAD(14));
++	/*
++	 * The UART is running and its TX output idle: connect the pins. The
++	 * function is selected before the TX pad's output is enabled, so the
++	 * pin goes straight to the idle level, and the line is left idle for
++	 * a few character times before the first character is sent.
++	 */
+ 	writel(RP1_FSEL_UART0, base + RP1_IO_BANK0_OFFSET + RP1_GPIO_CTRL(15));
+ 	writel(RP1_FSEL_UART0, base + RP1_IO_BANK0_OFFSET + RP1_GPIO_CTRL(14));
++	writel(RP1_PAD_UART_RX, base + RP1_PADS_BANK0_OFFSET + RP1_PAD(15));
++	writel(RP1_PAD_UART_TX, base + RP1_PADS_BANK0_OFFSET + RP1_PAD(14));
++	mdelay(2);
++
++	rpi5_console_replay();
+ 
+ 	rpi5_console_add("stdin");
+ 	rpi5_console_add("stdout");
+diff --git a/configs/rpi_arm64_defconfig b/configs/rpi_arm64_defconfig
+index 156f5953..a281883f 100644
+--- a/configs/rpi_arm64_defconfig
++++ b/configs/rpi_arm64_defconfig
+@@ -95,3 +95,6 @@ CONFIG_BOOTMETH_SCRIPT=n
+ CONFIG_PXE_UTILS=n
+ # Disable EFI bootmanager (reserves memory on 0x00080000 -> prevents continuing after being successful)
+ CONFIG_CMD_BOOTEFI_BOOTMGR=n
++CONFIG_CONSOLE_RECORD=y
++# CONFIG_CONSOLE_RECORD_INIT_F is not set
++CONFIG_CONSOLE_RECORD_OUT_SIZE=0x2000

@@ -1,0 +1,30 @@
+#!ipxe
+# Boot this machine from its own network disk on the iscsi image's server. The disk is found by the machine's MAC address, so this file is the
+# same for every machine; only its name differs.
+#
+# Where it goes: the TFTP root, as the host script of each machine (MAC
+# lower-case, with hyphens), e.g.
+#   <tftp root>/ipxe/hosts/02-00-00-00-00-01.ipxe
+# boot.ipxe runs it before Matchbox and the menu. (A Matchbox profile has only
+# a kernel, initrds and arguments: it cannot say sanboot.)
+#
+# The disk: disks/debian-<mac>.raw in the iscsi data directory, e.g. made with
+#   docker exec <iscsi container> iscsi-disk copy debian debian-02-00-00-00-00-01
+# For another base or name scheme, change the target name below.
+#
+# Root path: iscsi:<server>:<protocol>:<port>:<LUN>:<target>. LUN 1: tgt's
+# LUN 0 is its controller, and iPXE's default LUN 0 fails with an
+# input/output error. ${next-server} is the boot server (dnsmasq's address);
+# write the address instead if your DHCP setup gives another one.
+# The OS on the disk must bring its own iSCSI client that takes over from the
+# firmware table iPXE leaves (iBFT); get-debian-iscsi-disk.sh prepares Debian
+# so.
+
+echo Booting from iSCSI disk debian-${netX/mac:hexhyp} on ${next-server}
+sanboot iscsi:${next-server}:::1:iqn.2026-11.pxe.stack:debian-${netX/mac:hexhyp} || goto failed
+
+:failed
+echo sanboot failed: is there a disk debian-${netX/mac:hexhyp} (iscsi-disk list)?
+echo Going on with the normal boot in 5 seconds
+sleep 5
+exit 1

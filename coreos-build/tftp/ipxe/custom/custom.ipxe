@@ -1,0 +1,26 @@
+#!ipxe
+# The menu of the coreos image. netboot.xyz shows it as "Custom URL Menu" in its main
+# menu, because ipxe/netbootxyz.ipxe sets custom_url to this directory before it
+# loads the netboot.xyz menu. netboot.xyz does not check signatures on it (it
+# checks only its own menus). Leaving this menu returns to the netboot.xyz menu.
+# Published by the coreos stage image (coreos-build in pxe-builds).
+
+# --autofree: a finished script left loaded would end up in the initrd of
+# whatever boots next under UEFI (see fcos.ipxe)
+chain --autofree tftp://${next-server}/ipxe/coreos/fedora-coreos-stable.ipxe ||
+
+:menu
+menu Boot server ${next-server}
+item --gap Fedora CoreOS (live, runs from RAM; Ignition from coreos/ignition/):
+item fcos    Fedora CoreOS stable ${fcos_version}
+item --gap
+item back    Back to the netboot.xyz menu
+choose --default fcos selected || goto back
+goto ${selected}
+
+:fcos
+chain tftp://${next-server}/ipxe/fcos.ipxe ||
+goto menu
+
+:back
+exit 0

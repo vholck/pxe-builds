@@ -1,0 +1,65 @@
+# Builds U-Boot for Raspberry Pi 3, 4, or 5 and downloads all required
+# TFTP boot files into an output directory.
+#
+# CI builds the same files into the rpi-uboot image
+# (.github/workflows/build-rpi-uboot.yml). Use this compose file for local or
+# debug builds, or to create a per-device override directory.
+#
+# Output: {OUT_DIR}/tftp/ is a flat tree that serves every Pi of a supported model;
+# copy its contents to the TFTP root. generic-{model}/ is the per-model build cache.
+#
+# Environment variables:
+#   MODEL   rpi3 | rpi4 | rpi5  (default: all three)
+#   SERIAL  optional, e.g. 12345678. Creates tftp/{SERIAL}/, which overrides the
+#           flat files for that one Pi. Requires a single MODEL.
+#
+# Optional:
+#   OUT_DIR  host path for output files (default: ./out)
+#   FORCE_UBOOT_REBUILD=1    rebuild and re-download everything for the models
+#   UBOOT_DEBUG_ARTIFACTS=1  copy the U-Boot ELF, map and .config to out/debug/
+#   PUID, PGID               owner of the output files (default 1000)
+# Build settings (firmware commit, device trees, console, ...) come from
+# ../build.env, the file CI builds with.
+#
+# Usage:
+#   MODEL=rpi3 SERIAL=12345678 docker compose --env-file ../build.env run --rm rpi-uboot-build
+
+x-paths:
+  out_dir: &out_dir ${OUT_DIR:-./out}
+
+services:
+  rpi-uboot-build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # device tree sources (../build.env); the build fails without them
+      args:
+        RPI_DT_TAG: ${RPI_DT_TAG}
+        RPI_DT_COMMIT: ${RPI_DT_COMMIT}
+      # shared device tree sources (Dockerfile: COPY --from=dts)
+      additional_contexts:
+        dts: ../dts
+    restart: "no"
+    volumes:
+      - type: bind
+        source: *out_dir
+        target: /out
+    environment:
+      DEBIAN_FRONTEND: noninteractive
+      ARCH: arm
+      CROSS_COMPILE: aarch64-linux-gnu-
+      MODEL: ${MODEL:-rpi3 rpi4 rpi5}
+      FIRMWARE_VERSION: ${FIRMWARE_VERSION:-}
+      UBOOT_PRE_DHCP_SLEEP: ${UBOOT_PRE_DHCP_SLEEP:-}
+      UBOOT_LOCAL_BOOT_ORDER: ${UBOOT_LOCAL_BOOT_ORDER:-}
+      UBOOT_RPI5_EFI_FDT: ${UBOOT_RPI5_EFI_FDT:-firmware}
+      CONSOLE_MAIN: ${CONSOLE_MAIN:-}
+      UBOOT_VERSION_SUFFIX: ${UBOOT_VERSION_SUFFIX:-}
+      RPI_FIRMWARE_URL: https://github.com/raspberrypi/firmware
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      SERIAL: ${SERIAL:-}
+      FORCE_UBOOT_REBUILD: ${FORCE_UBOOT_REBUILD:-0}
+      UBOOT_DEBUG_ARTIFACTS: ${UBOOT_DEBUG_ARTIFACTS:-0}
+      EFI_ARM64_RPI_FILE: ${EFI_ARM64_RPI_FILE:-ipxe/snponly-arm64-rpi.efi}
+    entrypoint: ["/bin/bash", "/build.sh"]

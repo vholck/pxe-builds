@@ -1,0 +1,692 @@
+diff --git a/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.c b/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.c
+index 6419d28..f0083c7 100644
+--- a/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.c
++++ b/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.c
+@@ -18,25 +18,31 @@
+   enable_uart=1 in config.txt does. Without that setting the pins are left
+   alone, free for a HAT.
+ 
+-  Output starts when PCIe has been enumerated. What the firmware prints
+-  before that appears on the debug UART only.
++  Output starts when PCIe has been enumerated. The diagnostics the firmware
++  printed before that were recorded by its serial port library
++  (Rpi5SerialPortLib, Rpi5EarlyLog.h); they are printed on the new port when
++  it is ready, between two marker lines, and later diagnostics are written to
++  it as they happen, as on the debug UART.
+ 
+   SPDX-License-Identifier: BSD-2-Clause-Patent
+ **/
+ 
+ #include <Uefi.h>
++#include <Library/BaseLib.h>
+ #include <Library/BaseMemoryLib.h>
+ #include <Library/DebugLib.h>
+ #include <Library/FdtLib.h>
+ #include <Library/IoLib.h>
+ #include <Library/PcdLib.h>
+ #include <Library/PL011UartLib.h>
++#include <Library/PrintLib.h>
+ #include <Library/UefiBootServicesTableLib.h>
+ #include <Library/UefiLib.h>
+ #include <Protocol/DevicePath.h>
+ #include <Protocol/Rp1Bus.h>
+ #include <Protocol/SerialIo.h>
+ #include <Rp1.h>
++#include <Rpi5EarlyLog.h>
+ 
+ //
+ // The same value as FILE_GUID in Rp1UartDxe.inf and as RP1_UART_DXE_FILE_GUID
+@@ -93,6 +99,7 @@ typedef struct {
+ STATIC UINTN       mUartBase;
+ STATIC EFI_HANDLE  mSerialHandle;
+ STATIC VOID        *mRp1BusRegistration;
++STATIC EFI_EVENT   mExitBootServicesEvent;
+ 
+ STATIC RP1_UART_DEVICE_PATH  mSerialDevicePath = {
+   {
+@@ -394,6 +401,77 @@ GpioUartIsSerial0 (
+          ((StatusSize == sizeof ("ok")) && (CompareMem (Status, "ok", sizeof ("ok")) == 0));
+ }
+ 
++/**
++  Print on the new port the diagnostics recorded since the firmware started,
++  then let the serial port library write to the port directly.
++
++  The markers are there because the replayed lines are not printed when they
++  happened: in a timed capture they all carry the time of the replay.
++**/
++STATIC
++VOID
++ReplayEarlyLog (
++  VOID
++  )
++{
++  RPI5_EARLY_LOG  *Log;
++  CHAR8           Line[120];
++  UINTN           Used;
++
++  Log = (RPI5_EARLY_LOG *)(UINTN)RPI5_EARLY_LOG_BASE;
++  if (Log->Magic != RPI5_EARLY_LOG_MAGIC) {
++    return;
++  }
++
++  Used = MIN (Log->Used, RPI5_EARLY_LOG_CAPACITY);
++  if (Used != 0) {
++    AsciiSPrint (
++      Line,
++      sizeof (Line),
++      "\r\n--- UEFI firmware %s: earlier output, replayed ---\r\n",
++      (CHAR16 *)PcdGetPtr (PcdFirmwareVersionString)
++      );
++    PL011UartWrite (mUartBase, (UINT8 *)Line, AsciiStrLen (Line));
++    PL011UartWrite (mUartBase, (UINT8 *)Log->Data, Used);
++
++    if (Log->Dropped != 0) {
++      AsciiSPrint (
++        Line,
++        sizeof (Line),
++        "\r\n--- end of replay (%u more bytes were not recorded), live from here ---\r\n",
++        Log->Dropped
++        );
++    } else {
++      AsciiSPrint (Line, sizeof (Line), "\r\n--- end of replay, live from here ---\r\n");
++    }
++
++    PL011UartWrite (mUartBase, (UINT8 *)Line, AsciiStrLen (Line));
++  }
++
++  Log->GpioUartBase = mUartBase;
++}
++
++/**
++  At ExitBootServices: the record's memory and the RP1 belong to the
++  operating system from here on. Stop the library from using either.
++**/
++STATIC
++VOID
++EFIAPI
++ExitBootServicesNotify (
++  IN EFI_EVENT  Event,
++  IN VOID       *Context
++  )
++{
++  RPI5_EARLY_LOG  *Log;
++
++  Log = (RPI5_EARLY_LOG *)(UINTN)RPI5_EARLY_LOG_BASE;
++  if (Log->Magic == RPI5_EARLY_LOG_MAGIC) {
++    Log->GpioUartBase = 0;
++    Log->Magic        = 0;
++  }
++}
++
+ /**
+   Runs when the RP1 bus driver has found the chip: set up UART0, connect
+   GPIO 14 and 15 to it and publish it as a serial port.
+@@ -477,7 +555,10 @@ Rp1BusNotify (
+   if (EFI_ERROR (Status)) {
+     mSerialHandle = NULL;
+     DEBUG ((DEBUG_ERROR, "%a: failed to install the serial port. Status=%r\n", __func__, Status));
++    return;
+   }
++
++  ReplayEarlyLog ();
+ }
+ 
+ EFI_STATUS
+@@ -495,5 +576,12 @@ Rp1UartDxeEntryPoint (
+     &mRp1BusRegistration
+     );
+ 
+-  return EFI_SUCCESS;
++  return gBS->CreateEventEx (
++                EVT_NOTIFY_SIGNAL,
++                TPL_NOTIFY,
++                ExitBootServicesNotify,
++                NULL,
++                &gEfiEventExitBootServicesGuid,
++                &mExitBootServicesEvent
++                );
+ }
+diff --git a/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.inf b/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.inf
+index 7500a5f..31dbf13 100644
+--- a/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.inf
++++ b/Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.inf
+@@ -21,15 +21,18 @@
+   MdePkg/MdePkg.dec
+   MdeModulePkg/MdeModulePkg.dec
+   Platform/RaspberryPi/RaspberryPi.dec
++  Platform/RaspberryPi/RPi5/RPi5.dec
+   Silicon/RaspberryPi/RpiSiliconPkg/RpiSiliconPkg.dec
+ 
+ [LibraryClasses]
++  BaseLib
+   BaseMemoryLib
+   DebugLib
+   FdtLib
+   IoLib
+   PcdLib
+   PL011UartLib
++  PrintLib
+   UefiBootServicesTableLib
+   UefiDriverEntryPoint
+   UefiLib
+@@ -39,10 +42,14 @@
+   gEfiSerialIoProtocolGuid                      ## PRODUCES
+   gEfiDevicePathProtocolGuid                    ## PRODUCES
+ 
++[Guids]
++  gEfiEventExitBootServicesGuid
++
+ [FixedPcd]
+   gRaspberryPiTokenSpaceGuid.PcdFdtBaseAddress
+ 
+ [Pcd]
++  gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString
+   gEfiMdePkgTokenSpaceGuid.PcdUartDefaultBaudRate
+   gEfiMdePkgTokenSpaceGuid.PcdUartDefaultDataBits
+   gEfiMdePkgTokenSpaceGuid.PcdUartDefaultParity
+diff --git a/Platform/RaspberryPi/RPi5/Include/Rpi5EarlyLog.h b/Platform/RaspberryPi/RPi5/Include/Rpi5EarlyLog.h
+new file mode 100644
+index 0000000..5b4c9db
+--- /dev/null
++++ b/Platform/RaspberryPi/RPi5/Include/Rpi5EarlyLog.h
+@@ -0,0 +1,55 @@
++/** @file
++  Record of the firmware's diagnostic output on a Raspberry Pi 5.
++
++  The serial port on GPIO 14 and 15 belongs to the RP1 chip and cannot be
++  reached before PCIe has been enumerated. Until then the firmware's serial
++  port library (Rpi5SerialPortLib) also writes what it prints into this
++  record. When the port is up, Rp1UartDxe prints the record there and enters
++  the port's address; from then on the library writes to both ports.
++
++  The record lives at a fixed address, the first 64 KiB of system RAM, which
++  the platform's memory map reserves. A fixed address is used because the
++  library is linked into every module separately, the first of them long
++  before there is a HOB list or a protocol database to find shared data in.
++
++  SPDX-License-Identifier: BSD-2-Clause-Patent
++**/
++
++#ifndef RPI5_EARLY_LOG_H_
++#define RPI5_EARLY_LOG_H_
++
++#include <Base.h>
++
++//
++// Must be equal to PcdSystemMemoryBase; RaspberryPiMem.c checks it.
++//
++#define RPI5_EARLY_LOG_BASE   0x00400000
++#define RPI5_EARLY_LOG_SIZE   0x00010000
++#define RPI5_EARLY_LOG_MAGIC  SIGNATURE_32 ('R', '5', 'L', 'G')
++
++typedef struct {
++  //
++  // RPI5_EARLY_LOG_MAGIC while the record is in use. Set by the first module
++  // of a boot (SEC), cleared at ExitBootServices.
++  //
++  UINT32    Magic;
++  //
++  // Number of bytes in Data.
++  //
++  UINT32    Used;
++  //
++  // Number of bytes that did not fit.
++  //
++  UINT32    Dropped;
++  UINT32    Reserved;
++  //
++  // 0 while the GPIO serial port is not available: output is recorded.
++  // Otherwise the address of its PL011 registers: output is written there.
++  //
++  UINT64    GpioUartBase;
++  CHAR8     Data[];
++} RPI5_EARLY_LOG;
++
++#define RPI5_EARLY_LOG_CAPACITY  (RPI5_EARLY_LOG_SIZE - OFFSET_OF (RPI5_EARLY_LOG, Data))
++
++#endif // RPI5_EARLY_LOG_H_
+diff --git a/Platform/RaspberryPi/RPi5/Library/PlatformLib/PlatformLib.inf b/Platform/RaspberryPi/RPi5/Library/PlatformLib/PlatformLib.inf
+index 42fa84b..7b6ffec 100644
+--- a/Platform/RaspberryPi/RPi5/Library/PlatformLib/PlatformLib.inf
++++ b/Platform/RaspberryPi/RPi5/Library/PlatformLib/PlatformLib.inf
+@@ -25,6 +25,7 @@
+   ArmPlatformPkg/ArmPlatformPkg.dec
+   Silicon/Broadcom/Bcm283x/Bcm283x.dec
+   Platform/RaspberryPi/RaspberryPi.dec
++  Platform/RaspberryPi/RPi5/RPi5.dec
+ 
+ [LibraryClasses]
+   ArmLib
+diff --git a/Platform/RaspberryPi/RPi5/Library/PlatformLib/RaspberryPiMem.c b/Platform/RaspberryPi/RPi5/Library/PlatformLib/RaspberryPiMem.c
+index c0632fb..d0e5443 100644
+--- a/Platform/RaspberryPi/RPi5/Library/PlatformLib/RaspberryPiMem.c
++++ b/Platform/RaspberryPi/RPi5/Library/PlatformLib/RaspberryPiMem.c
+@@ -17,12 +17,13 @@
+ #include <Library/RPiMem.h>
+ #include <Library/BoardInfoLib.h>
+ #include <Library/BoardRevisionHelperLib.h>
++#include <Rpi5EarlyLog.h>
+ 
+ UINT64 mSystemMemoryBase;
+ extern UINT64 mSystemMemoryEnd;
+ 
+ // The total number of descriptors, including the final "end-of-table" descriptor.
+-#define MAX_VIRTUAL_MEMORY_MAP_DESCRIPTORS 11
++#define MAX_VIRTUAL_MEMORY_MAP_DESCRIPTORS 12
+ 
+ STATIC BOOLEAN                  VirtualMemoryInfoInitialized = FALSE;
+ STATIC RPI_MEMORY_REGION_INFO   VirtualMemoryInfo[MAX_VIRTUAL_MEMORY_MAP_DESCRIPTORS];
+@@ -107,10 +108,20 @@ ArmPlatformGetVirtualMemoryMap (
+   VirtualMemoryInfo[Index].Type             = RPI_MEM_RESERVED_REGION;
+   VirtualMemoryInfo[Index++].Name           = L"Flattened Device Tree";
+ 
++  // Record of early serial output (Rpi5EarlyLog.h): the first pages of the
++  // system RAM, kept away from the memory allocator and the operating system.
++  ASSERT (FixedPcdGet64 (PcdSystemMemoryBase) == RPI5_EARLY_LOG_BASE);
++  VirtualMemoryTable[Index].PhysicalBase    = RPI5_EARLY_LOG_BASE;
++  VirtualMemoryTable[Index].VirtualBase     = VirtualMemoryTable[Index].PhysicalBase;
++  VirtualMemoryTable[Index].Length          = RPI5_EARLY_LOG_SIZE;
++  VirtualMemoryTable[Index].Attributes      = ARM_MEMORY_REGION_ATTRIBUTE_WRITE_BACK;
++  VirtualMemoryInfo[Index].Type             = RPI_MEM_RESERVED_REGION;
++  VirtualMemoryInfo[Index++].Name           = L"Early serial output";
++
+   // Base System RAM
+-  VirtualMemoryTable[Index].PhysicalBase    = FixedPcdGet64 (PcdSystemMemoryBase);
++  VirtualMemoryTable[Index].PhysicalBase    = RPI5_EARLY_LOG_BASE + RPI5_EARLY_LOG_SIZE;
+   VirtualMemoryTable[Index].VirtualBase     = VirtualMemoryTable[Index].PhysicalBase;
+-  VirtualMemoryTable[Index].Length          = mSystemMemoryEnd + 1 - FixedPcdGet64 (PcdSystemMemoryBase);
++  VirtualMemoryTable[Index].Length          = mSystemMemoryEnd + 1 - VirtualMemoryTable[Index].PhysicalBase;
+   VirtualMemoryTable[Index].Attributes      = ARM_MEMORY_REGION_ATTRIBUTE_WRITE_BACK;
+   VirtualMemoryInfo[Index].Type             = RPI_MEM_BASIC_REGION;
+   VirtualMemoryInfo[Index++].Name           = L"System RAM < 1GB";
+diff --git a/Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLib.c b/Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLib.c
+new file mode 100644
+index 0000000..035d278
+--- /dev/null
++++ b/Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLib.c
+@@ -0,0 +1,255 @@
++/** @file
++  Serial port library of the Raspberry Pi 5: the debug UART (a PL011 on the
++  3-pin connector), as PL011SerialPortLib, and in addition a copy of
++  everything written for the serial port on GPIO 14 and 15.
++
++  That port belongs to the RP1 chip and appears late in the boot. Output is
++  recorded in memory until Rp1UartDxe has set the port up, and written to it
++  directly afterwards. See Rpi5EarlyLog.h.
++
++  Based on ArmPlatformPkg/Library/PL011SerialPortLib.
++
++  Copyright (c) 2008 - 2010, Apple Inc. All rights reserved.<BR>
++  Copyright (c) 2012 - 2016, ARM Ltd. All rights reserved.<BR>
++  Copyright (c) 2015, Intel Corporation. All rights reserved.<BR>
++
++  SPDX-License-Identifier: BSD-2-Clause-Patent
++**/
++
++#include <Base.h>
++
++#include <Library/BaseMemoryLib.h>
++#include <Library/IoLib.h>
++#include <Library/PcdLib.h>
++#include <Library/PL011UartClockLib.h>
++#include <Library/PL011UartLib.h>
++#include <Library/SerialPortLib.h>
++#include <Rpi5EarlyLog.h>
++
++#define DEBUG_UART_BASE  ((UINTN)PcdGet64 (PcdSerialRegisterBase))
++
++#ifdef RPI5_EARLY_LOG_OWNER
++//
++// Only in the instance linked into the first module of a boot (SEC). The
++// firmware image is loaded into RAM, so the variable can be written.
++//
++STATIC BOOLEAN  mEarlyLogStarted = FALSE;
++#endif
++
++/**
++  Record the output, or write it to the GPIO serial port when that is up.
++**/
++STATIC
++VOID
++EarlyLogWrite (
++  IN UINT8  *Buffer,
++  IN UINTN  NumberOfBytes
++  )
++{
++  RPI5_EARLY_LOG  *Log;
++  UINTN           Room;
++
++  Log = (RPI5_EARLY_LOG *)(UINTN)RPI5_EARLY_LOG_BASE;
++  if (Log->Magic != RPI5_EARLY_LOG_MAGIC) {
++    return;
++  }
++
++  if (Log->GpioUartBase != 0) {
++    PL011UartWrite ((UINTN)Log->GpioUartBase, Buffer, NumberOfBytes);
++    return;
++  }
++
++  if (Log->Used > RPI5_EARLY_LOG_CAPACITY) {
++    return;
++  }
++
++  Room = RPI5_EARLY_LOG_CAPACITY - Log->Used;
++  if (NumberOfBytes > Room) {
++    Log->Dropped += (UINT32)(NumberOfBytes - Room);
++    NumberOfBytes = Room;
++  }
++
++  CopyMem (Log->Data + Log->Used, Buffer, NumberOfBytes);
++  Log->Used += (UINT32)NumberOfBytes;
++}
++
++/**
++  Initialise the debug UART.
++
++  @retval RETURN_SUCCESS            The serial device was initialised.
++  @retval RETURN_INVALID_PARAMETER  One or more of the default settings
++                                    has an unsupported value.
++**/
++RETURN_STATUS
++EFIAPI
++SerialPortInitialize (
++  VOID
++  )
++{
++  UINT64              BaudRate;
++  UINT32              ReceiveFifoDepth;
++  EFI_PARITY_TYPE     Parity;
++  UINT8               DataBits;
++  EFI_STOP_BITS_TYPE  StopBits;
++  RETURN_STATUS       Status;
++  UINT8               Scratch;
++
++ #ifdef RPI5_EARLY_LOG_OWNER
++  RPI5_EARLY_LOG  *Log;
++
++  //
++  // A new boot: start an empty record. RAM keeps its content over a reset,
++  // so whatever is there, a port address above all, is stale.
++  //
++  if (!mEarlyLogStarted) {
++    Log               = (RPI5_EARLY_LOG *)(UINTN)RPI5_EARLY_LOG_BASE;
++    Log->GpioUartBase = 0;
++    Log->Used         = 0;
++    Log->Dropped      = 0;
++    Log->Reserved     = 0;
++    Log->Magic        = RPI5_EARLY_LOG_MAGIC;
++    mEarlyLogStarted  = TRUE;
++  }
++
++ #endif
++
++  BaudRate         = PcdGet64 (PcdUartDefaultBaudRate);
++  ReceiveFifoDepth = 0;         // Use default FIFO depth
++  Parity           = (EFI_PARITY_TYPE)PcdGet8 (PcdUartDefaultParity);
++  DataBits         = PcdGet8 (PcdUartDefaultDataBits);
++  StopBits         = (EFI_STOP_BITS_TYPE)PcdGet8 (PcdUartDefaultStopBits);
++
++  Status = PL011UartInitializePort (
++             DEBUG_UART_BASE,
++             PL011UartClockGetFreq (),
++             &BaudRate,
++             &ReceiveFifoDepth,
++             &Parity,
++             &DataBits,
++             &StopBits
++             );
++  if (RETURN_ERROR (Status)) {
++    return Status;
++  }
++
++  if (PcdGetBool (PcdSerialUseHardwareFlowControl)) {
++    Status = PL011UartSetControl (
++               DEBUG_UART_BASE,
++               EFI_SERIAL_HARDWARE_FLOW_CONTROL_ENABLE
++               );
++    if (RETURN_ERROR (Status)) {
++      return Status;
++    }
++  }
++
++  //
++  // Empty the receive buffer.
++  //
++  while (SerialPortPoll ()) {
++    SerialPortRead (&Scratch, sizeof (Scratch));
++  }
++
++  return RETURN_SUCCESS;
++}
++
++/**
++  Write data to the debug UART, and to the record or the GPIO serial port.
++
++  @param  Buffer         The data to write.
++  @param  NumberOfBytes  The number of bytes in Buffer.
++
++  @return The number of bytes written to the debug UART.
++**/
++UINTN
++EFIAPI
++SerialPortWrite (
++  IN UINT8  *Buffer,
++  IN UINTN  NumberOfBytes
++  )
++{
++  EarlyLogWrite (Buffer, NumberOfBytes);
++
++  return PL011UartWrite (DEBUG_UART_BASE, Buffer, NumberOfBytes);
++}
++
++/**
++  Read data from the debug UART.
++
++  @param  Buffer         Where to store the data.
++  @param  NumberOfBytes  The number of bytes to read.
++
++  @return The number of bytes read.
++**/
++UINTN
++EFIAPI
++SerialPortRead (
++  OUT UINT8  *Buffer,
++  IN  UINTN  NumberOfBytes
++  )
++{
++  return PL011UartRead (DEBUG_UART_BASE, Buffer, NumberOfBytes);
++}
++
++/**
++  Check whether the debug UART has received data.
++
++  @retval TRUE   At least one byte can be read.
++  @retval FALSE  No data.
++**/
++BOOLEAN
++EFIAPI
++SerialPortPoll (
++  VOID
++  )
++{
++  return PL011UartPoll (DEBUG_UART_BASE);
++}
++
++/**
++  Set the line settings of the debug UART. See PL011UartInitializePort().
++**/
++RETURN_STATUS
++EFIAPI
++SerialPortSetAttributes (
++  IN OUT UINT64              *BaudRate,
++  IN OUT UINT32              *ReceiveFifoDepth,
++  IN OUT UINT32              *Timeout,
++  IN OUT EFI_PARITY_TYPE     *Parity,
++  IN OUT UINT8               *DataBits,
++  IN OUT EFI_STOP_BITS_TYPE  *StopBits
++  )
++{
++  return PL011UartInitializePort (
++           DEBUG_UART_BASE,
++           PL011UartClockGetFreq (),
++           BaudRate,
++           ReceiveFifoDepth,
++           Parity,
++           DataBits,
++           StopBits
++           );
++}
++
++/**
++  Set the control signals of the debug UART. See PL011UartSetControl().
++**/
++RETURN_STATUS
++EFIAPI
++SerialPortSetControl (
++  IN UINT32  Control
++  )
++{
++  return PL011UartSetControl (DEBUG_UART_BASE, Control);
++}
++
++/**
++  Read the control signals of the debug UART. See PL011UartGetControl().
++**/
++RETURN_STATUS
++EFIAPI
++SerialPortGetControl (
++  OUT UINT32  *Control
++  )
++{
++  return PL011UartGetControl (DEBUG_UART_BASE, Control);
++}
+diff --git a/Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLib.inf b/Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLib.inf
+new file mode 100644
+index 0000000..9ff95ce
+--- /dev/null
++++ b/Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLib.inf
+@@ -0,0 +1,39 @@
++## @file
++#  Serial port library of the Raspberry Pi 5: the debug UART, plus a copy of
++#  the output for the serial port on GPIO 14 and 15 (see Rpi5EarlyLog.h).
++#
++#  SPDX-License-Identifier: BSD-2-Clause-Patent
++##
++
++[Defines]
++  INF_VERSION                    = 0x0001001A
++  BASE_NAME                      = Rpi5SerialPortLib
++  FILE_GUID                      = 0f6a2f8c-52c4-4a37-9d0e-6b3a4c1f7e25
++  MODULE_TYPE                    = BASE
++  VERSION_STRING                 = 1.0
++  LIBRARY_CLASS                  = SerialPortLib
++
++[Sources.common]
++  Rpi5SerialPortLib.c
++
++[LibraryClasses]
++  BaseMemoryLib
++  PL011UartClockLib
++  PL011UartLib
++  PcdLib
++
++[Packages]
++  EmbeddedPkg/EmbeddedPkg.dec
++  MdePkg/MdePkg.dec
++  MdeModulePkg/MdeModulePkg.dec
++  ArmPlatformPkg/ArmPlatformPkg.dec
++  Platform/RaspberryPi/RPi5/RPi5.dec
++
++[Pcd]
++  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialRegisterBase
++  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialUseHardwareFlowControl
++  gEfiMdePkgTokenSpaceGuid.PcdUartDefaultBaudRate
++  gEfiMdePkgTokenSpaceGuid.PcdUartDefaultDataBits
++  gEfiMdePkgTokenSpaceGuid.PcdUartDefaultParity
++  gEfiMdePkgTokenSpaceGuid.PcdUartDefaultStopBits
++  gArmPlatformTokenSpaceGuid.PL011UartClkInHz
+diff --git a/Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLibSec.inf b/Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLibSec.inf
+new file mode 100644
+index 0000000..b9ee895
+--- /dev/null
++++ b/Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLibSec.inf
+@@ -0,0 +1,42 @@
++## @file
++#  Rpi5SerialPortLib for the first module of a boot (SEC): the same library,
++#  and it starts the record of early output (see Rpi5EarlyLog.h).
++#
++#  SPDX-License-Identifier: BSD-2-Clause-Patent
++##
++
++[Defines]
++  INF_VERSION                    = 0x0001001A
++  BASE_NAME                      = Rpi5SerialPortLibSec
++  FILE_GUID                      = 6e0d3b7a-94a1-4f0e-8c52-1d7f2a9b3c48
++  MODULE_TYPE                    = BASE
++  VERSION_STRING                 = 1.0
++  LIBRARY_CLASS                  = SerialPortLib|SEC
++
++[Sources.common]
++  Rpi5SerialPortLib.c
++
++[LibraryClasses]
++  BaseMemoryLib
++  PL011UartClockLib
++  PL011UartLib
++  PcdLib
++
++[Packages]
++  EmbeddedPkg/EmbeddedPkg.dec
++  MdePkg/MdePkg.dec
++  MdeModulePkg/MdeModulePkg.dec
++  ArmPlatformPkg/ArmPlatformPkg.dec
++  Platform/RaspberryPi/RPi5/RPi5.dec
++
++[Pcd]
++  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialRegisterBase
++  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialUseHardwareFlowControl
++  gEfiMdePkgTokenSpaceGuid.PcdUartDefaultBaudRate
++  gEfiMdePkgTokenSpaceGuid.PcdUartDefaultDataBits
++  gEfiMdePkgTokenSpaceGuid.PcdUartDefaultParity
++  gEfiMdePkgTokenSpaceGuid.PcdUartDefaultStopBits
++  gArmPlatformTokenSpaceGuid.PL011UartClkInHz
++
++[BuildOptions]
++  GCC:*_*_*_CC_FLAGS = -DRPI5_EARLY_LOG_OWNER
+diff --git a/Platform/RaspberryPi/RPi5/RPi5.dsc b/Platform/RaspberryPi/RPi5/RPi5.dsc
+index 7bd07ce..d361e8d 100644
+--- a/Platform/RaspberryPi/RPi5/RPi5.dsc
++++ b/Platform/RaspberryPi/RPi5/RPi5.dsc
+@@ -133,7 +133,8 @@
+   # Dual serial port library
+   PL011UartClockLib|ArmPlatformPkg/Library/PL011UartClockLib/PL011UartClockLib.inf
+   PL011UartLib|ArmPlatformPkg/Library/PL011UartLib/PL011UartLib.inf
+-  SerialPortLib|ArmPlatformPkg/Library/PL011SerialPortLib/PL011SerialPortLib.inf
++  # The debug UART, plus a copy of the output for the GPIO serial port
++  SerialPortLib|Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLib.inf
+ 
+   # Cryptographic libraries
+   RngLib|MdePkg/Library/DxeRngLib/DxeRngLib.inf
+@@ -194,6 +195,7 @@
+   PciSegmentLib|Silicon/Broadcom/Bcm27xx/Library/Bcm2712PciSegmentLib/PciSegmentLib.inf
+ 
+ [LibraryClasses.common.SEC]
++  SerialPortLib|Platform/RaspberryPi/RPi5/Library/Rpi5SerialPortLib/Rpi5SerialPortLibSec.inf
+   PcdLib|MdePkg/Library/BasePcdLibNull/BasePcdLibNull.inf
+   BaseMemoryLib|MdePkg/Library/BaseMemoryLib/BaseMemoryLib.inf
+   MemoryInitPeiLib|Platform/RaspberryPi/Library/MemoryInitPeiLib/MemoryInitPeiLib.inf
+@@ -564,7 +566,12 @@
+   MdeModulePkg/Universal/Console/ConSplitterDxe/ConSplitterDxe.inf
+   MdeModulePkg/Universal/Console/GraphicsConsoleDxe/GraphicsConsoleDxe.inf
+   MdeModulePkg/Universal/Console/TerminalDxe/TerminalDxe.inf
+-  MdeModulePkg/Universal/SerialDxe/SerialDxe.inf
++  MdeModulePkg/Universal/SerialDxe/SerialDxe.inf {
++    <LibraryClasses>
++      # Console text for the debug UART only: the GPIO serial port has its
++      # own console, a copy would show every character there twice.
++      SerialPortLib|ArmPlatformPkg/Library/PL011SerialPortLib/PL011SerialPortLib.inf
++  }
+   # Second serial port: GPIO 14/15 (UART0 of the RP1)
+   Platform/RaspberryPi/RPi5/Drivers/Rp1UartDxe/Rp1UartDxe.inf
+   Platform/RaspberryPi/Drivers/DisplayDxe/DisplayDxe.inf

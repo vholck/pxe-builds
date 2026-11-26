@@ -1,0 +1,66 @@
+Subject: [PATCH] rpi: OS console on the display when one is present
+
+/chosen/stdout-path names the serial port, and Linux started without
+console= makes it its main console, also when a display is connected.
+EDK2 on the same boards (ConsolePrefDxe) removes stdout-path when a
+display is present, unless its preference is set to serial.
+
+Do the same in ft_board_setup() for every Pi: when U-Boot's video
+device is up (the firmware sets up a framebuffer only when a display
+answered), remove stdout-path unless the environment variable
+console_main is "serial". Print which console the OS gets.
+---
+diff --git a/board/raspberrypi/rpi/rpi.c b/board/raspberrypi/rpi/rpi.c
+index 38af9487..0c11e49c 100644
+--- a/board/raspberrypi/rpi/rpi.c
++++ b/board/raspberrypi/rpi/rpi.c
+@@ -648,6 +648,40 @@ void  update_fdt_from_fw(void *fdt, void *fw_fdt)
+ 	copy_property(fdt, fw_fdt, "/clocks/clk-uart", "clock-frequency");
+ }
+ 
++/*
++ * Main console of the operating system, the same rule on every Pi.
++ *
++ * The device tree names the serial port in /chosen/stdout-path, and Linux
++ * started without console= makes that its main console. When a display is
++ * present (U-Boot's video device is up; the firmware sets up a framebuffer
++ * only when a display answered), the property is removed unless the
++ * environment variable console_main is "serial", so Linux makes the display
++ * its main console. Without a display the property is kept. This is what
++ * EDK2's ConsolePrefDxe does under UEFI ("graphical" preference unless set
++ * to serial).
++ */
++static void rpi_fdt_console_main(void *blob)
++{
++	struct udevice *video;
++	const char *main;
++	bool display;
++	int node;
++
++	node = fdt_path_offset(blob, "/chosen");
++	if (node < 0 || !fdt_getprop(blob, node, "stdout-path", NULL))
++		return;
++
++	display = !uclass_first_device_err(UCLASS_VIDEO, &video);
++	main = env_get("console_main");
++	if (display && (!main || strcmp(main, "serial"))) {
++		fdt_delprop(blob, node, "stdout-path");
++		printf("RPI: OS console on the display (stdout-path removed)\n");
++	} else {
++		printf("RPI: OS console on serial (stdout-path kept%s)\n",
++		       display ? ", console_main=serial" : "");
++	}
++}
++
+ int ft_board_setup(void *blob, struct bd_info *bd)
+ {
+ 	int node;
+@@ -665,6 +699,8 @@ int ft_board_setup(void *blob, struct bd_info *bd)
+ 			fdt_simplefb_enable_and_mem_rsv(blob);
+ 	}
+ 
++	rpi_fdt_console_main(blob);
++
+ #ifdef CONFIG_EFI_LOADER
+ 	/* Reserve the spin table */
+ 	efi_add_memory_map(0, CONFIG_RPI_EFI_NR_SPIN_PAGES << EFI_PAGE_SHIFT,

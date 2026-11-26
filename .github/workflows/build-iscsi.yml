@@ -1,0 +1,79 @@
+name: Build iSCSI service image
+
+# Builds the iscsi server image (tgt, see iscsi-build/) and pins its tag in
+# the repository that deploys the images (secret STACKS_DEPLOY_KEY).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - iscsi-build/**
+      - .github/workflows/build-iscsi.yml
+      # documentation only: no rebuild, no pin, no redeploy
+      - '!**.md'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (branch, tag, or full commit SHA). Defaults to the branch selected above.'
+        required: false
+        default: ''
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/vholck/pxe-builds/iscsi
+
+concurrency:
+  group: build-iscsi
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Resolve SHA
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -eu
+          docker build -t "${IMAGE_NAME}:${SHA}" iscsi-build
+          docker run --rm --entrypoint cat "${IMAGE_NAME}:${SHA}" /tgt.version | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Push image
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+          TAG_LATEST: ${{ github.event_name == 'push' || inputs.ref == '' }}
+        run: |
+          set -eu
+          docker push "${IMAGE_NAME}:${SHA}"
+          if [ "${TAG_LATEST}" = "true" ]; then
+            docker tag "${IMAGE_NAME}:${SHA}" "${IMAGE_NAME}:latest"
+            docker push "${IMAGE_NAME}:latest"
+          fi
+
+      - name: Pin the image in the stacks repository
+        if: github.event_name == 'push' || inputs.ref == ''
+        uses: ./.github/actions/pin-in-stacks
+        with:
+          key: ISCSI_IMAGE_TAG
+          value: "${{ steps.sha.outputs.sha }}"
+          message: "chore(pxe): pin iscsi image to ${{ steps.sha.outputs.sha }}"
+          ssh-key: ${{ secrets.STACKS_DEPLOY_KEY }}

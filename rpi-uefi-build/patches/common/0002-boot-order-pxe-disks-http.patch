@@ -1,0 +1,88 @@
+diff --git a/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBm.c b/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBm.c
+index 4549ec3..1138656 100644
+--- a/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBm.c
++++ b/Platform/RaspberryPi/Library/PlatformBootManagerLib/PlatformBm.c
+@@ -782,6 +782,74 @@ BootDiscoveryPolicyHandler (
+   return EFI_SUCCESS;
+ }
+ 
++//
++// Order of the boot options: network boot through PXE first, then the local
++// devices (USB, SD, NVMe), then HTTP boot, then the applications built into
++// the firmware (setup, shell). A network boot program that hands back to the
++// firmware (netboot.xyz "Boot from local hdd") then reaches a disk at once,
++// instead of first waiting for an HTTP boot server.
++//
++STATIC
++UINTN
++BootOptionRank (
++  IN CONST EFI_BOOT_MANAGER_LOAD_OPTION  *Option
++  )
++{
++  EFI_DEVICE_PATH_PROTOCOL  *Node;
++  BOOLEAN                   Mac;
++  BOOLEAN                   Uri;
++
++  Mac = FALSE;
++  Uri = FALSE;
++  for (Node = Option->FilePath; !IsDevicePathEnd (Node);
++       Node = NextDevicePathNode (Node)) {
++    if ((DevicePathType (Node) == MEDIA_DEVICE_PATH) &&
++        (DevicePathSubType (Node) == MEDIA_PIWG_FW_FILE_DP)) {
++      return 3;
++    }
++    if (DevicePathType (Node) == MESSAGING_DEVICE_PATH) {
++      if (DevicePathSubType (Node) == MSG_MAC_ADDR_DP) {
++        Mac = TRUE;
++      } else if (DevicePathSubType (Node) == MSG_URI_DP) {
++        Uri = TRUE;
++      }
++    }
++  }
++  if (Uri) {
++    return 2;
++  }
++  return Mac ? 0 : 1;
++}
++
++STATIC
++INTN
++EFIAPI
++CompareBootOption (
++  IN CONST VOID  *Left,
++  IN CONST VOID  *Right
++  )
++{
++  CONST EFI_BOOT_MANAGER_LOAD_OPTION  *L;
++  CONST EFI_BOOT_MANAGER_LOAD_OPTION  *R;
++  UINTN                               RankL;
++  UINTN                               RankR;
++
++  L = Left;
++  R = Right;
++  RankL = BootOptionRank (L);
++  RankR = BootOptionRank (R);
++  if (RankL != RankR) {
++    return (RankL < RankR) ? -1 : 1;
++  }
++  //
++  // Same kind: keep the order in which the options were created.
++  //
++  if (L->OptionNumber != R->OptionNumber) {
++    return (L->OptionNumber < R->OptionNumber) ? -1 : 1;
++  }
++  return 0;
++}
++
+ /**
+   Do the platform specific action after the console is ready
+   Possible things that can be done in PlatformBootManagerAfterConsole:
+@@ -840,6 +908,8 @@ PlatformBootManagerAfterConsole (
+   }
+ 
+   PlatformRegisterOptionsAndKeys ();
++
++  EfiBootManagerSortLoadOptionVariable (LoadOptionTypeBoot, CompareBootOption);
+ }
+ 
+ /**

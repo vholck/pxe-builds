@@ -1,0 +1,98 @@
+Subject: [PATCH] serial: pl01x: drop characters received with an error flag
+
+On a Raspberry Pi 5 started with enable_uart=1, the firmware leaves one break
+character (data 0x00 with the break and framing error flags, DR = 0x500) in the
+receive FIFO of the debug UART. U-Boot reported it as pending input, so the
+autoboot countdown ended at the prompt and the board never booted.
+
+pending() now reads ahead: characters with an error flag are dropped, a valid
+character is held until getc() takes it. A real key press still stops autoboot.
+---
+diff --git a/drivers/serial/serial_pl01x.c b/drivers/serial/serial_pl01x.c
+index e6bf0c2935..c753aad417 100644
+--- a/drivers/serial/serial_pl01x.c
++++ b/drivers/serial/serial_pl01x.c
+@@ -67,7 +67,7 @@ static int pl01x_getc(struct pl01x_regs *regs)
+ 	return (int) data;
+ }
+ 
+-static int pl01x_tstc(struct pl01x_regs *regs)
++static int __maybe_unused pl01x_tstc(struct pl01x_regs *regs)
+ {
+ 	schedule();
+ 	return !(readl(&regs->fr) & UART_PL01x_FR_RXFE);
+@@ -334,11 +334,43 @@ int pl01x_serial_probe(struct udevice *dev)
+ 	}
+ }
+ 
++/*
++ * Read the receive FIFO until it gives a valid character or is empty.
++ *
++ * A character received with an error flag (a break, a framing error) is
++ * dropped here and never reported as input. Otherwise a break that reached
++ * the FIFO before U-Boot started, for example while the firmware set up the
++ * pins, counts as a key press and stops autoboot.
++ *
++ * The valid character is held in priv, because the PL011 cannot show the
++ * head of its FIFO without removing it.
++ */
++static bool pl01x_rx_fill(struct pl01x_priv *priv)
++{
++	int ch;
++
++	while (!priv->rx_held) {
++		ch = pl01x_getc(priv->regs);
++		if (ch == -EAGAIN)
++			break;
++		if (ch < 0)
++			continue;
++		priv->rx_char = ch;
++		priv->rx_held = true;
++	}
++
++	return priv->rx_held;
++}
++
+ int pl01x_serial_getc(struct udevice *dev)
+ {
+ 	struct pl01x_priv *priv = dev_get_priv(dev);
+ 
+-	return pl01x_getc(priv->regs);
++	if (!pl01x_rx_fill(priv))
++		return -EAGAIN;
++	priv->rx_held = false;
++
++	return priv->rx_char;
+ }
+ 
+ int pl01x_serial_putc(struct udevice *dev, const char ch)
+@@ -353,10 +385,12 @@ int pl01x_serial_pending(struct udevice *dev, bool input)
+ 	struct pl01x_priv *priv = dev_get_priv(dev);
+ 	unsigned int fr = readl(&priv->regs->fr);
+ 
+-	if (input)
+-		return pl01x_tstc(priv->regs);
+-	else
++	if (input) {
++		schedule();
++		return pl01x_rx_fill(priv);
++	} else {
+ 		return fr & UART_PL01x_FR_TXFE ? 0 : 1;
++	}
+ }
+ 
+ static const struct dm_serial_ops pl01x_serial_ops = {
+diff --git a/drivers/serial/serial_pl01x_internal.h b/drivers/serial/serial_pl01x_internal.h
+index 3c481b1e3d..7b59192374 100644
+--- a/drivers/serial/serial_pl01x_internal.h
++++ b/drivers/serial/serial_pl01x_internal.h
+@@ -48,6 +48,9 @@ int pl01x_serial_setbrg(struct udevice *dev, int baudrate);
+ struct pl01x_priv {
+ 	struct pl01x_regs *regs;
+ 	enum pl01x_type type;
++	/* a valid character read ahead from the FIFO, see pl01x_rx_fill() */
++	bool rx_held;
++	unsigned char rx_char;
+ };
+ 
+ #endif /* CONFIG_DM_SERIAL */

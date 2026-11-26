@@ -1,0 +1,44 @@
+diff --git a/drivers/mmc/bcm2835_sdhci.c b/drivers/mmc/bcm2835_sdhci.c
+index efa4d14f..6f3e690b 100644
+--- a/drivers/mmc/bcm2835_sdhci.c
++++ b/drivers/mmc/bcm2835_sdhci.c
+@@ -163,10 +163,39 @@ static const struct sdhci_ops bcm2835_ops = {
+ 	.read_b = bcm2835_sdhci_readb,
+ };
+ 
++/*
++ * A non-removable slot whose device tree node has an SDIO function as a child
++ * holds no storage. On the Raspberry Pi 3 and 4 that is mmcnr@7e300000 with
++ * the on-board WiFi chip (wifi@1). U-Boot has no SDIO support, and looking
++ * for an SD or eMMC card there only costs time: on a Pi 4 about 3 seconds of
++ * "mmc1 busy timeout" every time the block devices are scanned.
++ *
++ * A soldered eMMC is non-removable too, but its only possible child node is
++ * the card itself ("mmc-card"), so it is not taken for an SDIO slot.
++ */
++static bool bcm2835_sdhci_is_sdio_slot(struct udevice *dev)
++{
++	ofnode node;
++
++	if (!dev_read_bool(dev, "non-removable"))
++		return false;
++
++	dev_for_each_subnode(node, dev) {
++		if (!ofnode_device_is_compatible(node, "mmc-card"))
++			return true;
++	}
++
++	return false;
++}
++
+ static int bcm2835_sdhci_bind(struct udevice *dev)
+ {
+ 	struct bcm2835_sdhci_plat *plat = dev_get_plat(dev);
+ 
++	/* -ENODEV: driver model leaves the node unbound, without a message */
++	if (bcm2835_sdhci_is_sdio_slot(dev))
++		return -ENODEV;
++
+ 	return sdhci_bind(dev, &plat->mmc, &plat->cfg);
+ }
+ 
