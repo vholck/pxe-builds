@@ -13,6 +13,9 @@ chain --autofree tftp://${next-server}/ipxe/coreos/fedora-coreos-stable.ipxe ||
 menu Boot server ${next-server}
 item --gap Fedora CoreOS (live, runs from RAM; Ignition from coreos/ignition/):
 item fcos    Fedora CoreOS stable ${fcos_version}
+# Windows PE needs an x86 machine (BIOS or UEFI); the item is left out on arm64.
+iseq ${buildarch} arm64 || item --gap Windows PE (runs from RAM; served by Matchbox, see coreos-build README):
+iseq ${buildarch} arm64 || item winpe   Windows PE command prompt (rescue)
 item --gap
 item back    Back to the netboot.xyz menu
 choose --default fcos selected || goto back
@@ -20,6 +23,15 @@ goto ${selected}
 
 :fcos
 chain tftp://${next-server}/ipxe/fcos.ipxe ||
+goto menu
+
+:winpe
+# Free this menu and netboot.xyz's: under UEFI wimboot would pass every
+# image still loaded into Windows PE as a file.
+imgfree ||
+chain --autofree http://${next-server}:8080/ipxe?rescue=windows-pe&arch=${buildarch:uristring} ||
+echo Windows PE: no answer from Matchbox for rescue=windows-pe (see coreos-build README)
+prompt --timeout 10000 Press a key for the menu ||
 goto menu
 
 :back

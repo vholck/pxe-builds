@@ -13,7 +13,7 @@ It publishes:
 | Path in the TFTP root | What |
 |---|---|
 | `ipxe/fcos.ipxe` | Boots Fedora CoreOS as a live system |
-| `ipxe/custom/custom.ipxe` | A small menu with a *Fedora CoreOS stable* entry, for netboot.xyz's "Custom URL Menu" (see below) |
+| `ipxe/custom/custom.ipxe` | A small menu with a *Fedora CoreOS stable* entry and, on x86, *Windows PE command prompt (rescue)*, for netboot.xyz's "Custom URL Menu" (see below) |
 | `ipxe/coreos/fedora-coreos-stable.ipxe` | Sets `fcos_version` to the newest stable release; written at build time |
 | `coreos/initrd/fedora-coreos-<version>-aarch64.cpio` | Extra initrd for the Pi 5, one per release, for the last six stable releases |
 | `coreos/ignition/README.txt` | How to add Ignition configs |
@@ -65,6 +65,7 @@ services:
 The scripts expect an iPXE with HTTPS support that was loaded from the same TFTP server (they use `${next-server}`), such as the builds in [ipxe-build](../ipxe-build/README.md).
 
 - **From netboot.xyz:** ipxe-build's [netbootxyz.ipxe](../ipxe-build/tftp/ipxe/netbootxyz.ipxe) sets netboot.xyz's `custom_url` to `ipxe/custom/` on the TFTP server. Then: netboot.xyz main menu → *Custom URL Menu* → *Fedora CoreOS stable*.
+- **Windows PE (rescue):** the same menu has, on x86 machines, *Windows PE command prompt (rescue)*. It chains `http://<server>:8080/ipxe?rescue=windows-pe&arch=<arch>`: a [Matchbox](https://matchbox.psdn.io/) on the boot server with a group whose selector is `rescue: windows-pe` decides what boots (wimboot, `boot.wim` and the other files of a Windows ISO, and a `winpeshl.ini` of your choice). Without such a group the item says so and returns to the menu. Leaving the menu frees every loaded image first: under UEFI wimboot hands every image still loaded to Windows PE as a file.
 - **Always, for one machine:** with ipxe-build's [boot.ipxe](../ipxe-build/tftp/ipxe/boot.ipxe), put a per-machine script in `ipxe/hosts/<mac>.ipxe` (MAC lower-case with hyphens, e.g. `ipxe/hosts/02-00-00-00-00-01.ipxe`):
   ```
   #!ipxe
