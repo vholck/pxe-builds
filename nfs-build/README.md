@@ -122,6 +122,7 @@ docker exec <container> nfs-root <command> ...
 | `reset <clean> <name>` | Deletes `/rw/<name>` and makes it again from `/ro/<clean>`, as a copy or layered as it was. |
 | `delete <name>` | Deletes `/rw/<name>`. A clean root in `/ro` is not deleted by this command; delete it on the host once no layered root uses it. |
 | `save <name> <clean>` | Copies `/rw/<name>` to `/ro/<clean>` as a new clean root (fails if it exists), with an empty machine ID. |
+| `rebase <clean> <name>...` | Moves machine roots to the clean root `/ro/<clean>`, typically a newer version of the system, and keeps each machine's data and identity (see below). A copy stays a copy, a layered root stays layered. |
 
 A typical cycle: boot a machine from its own copy, install and set up what you want, power it off, `save` it as a new clean root.
 
@@ -129,7 +130,27 @@ A typical cycle: boot a machine from its own copy, install and set up what you w
 - **Names:** a plain directory name of letters, digits, `.`, `_` and `-`, not starting with a dot.
 - **Copies** use `cp -a --reflink=auto`: instant on a host file system with reflinks (Btrfs, XFS), a full copy elsewhere.
 - **Layered roots** cost only the space of the changes and are made or reset at once. Their clean root must not change or go away while they use it: to update, save a new clean root under a new name.
-- Power a machine off before `reset` or `delete`: its root disappears under it.
+- Power a machine off before `reset`, `delete` or `rebase`: its root disappears under it.
+
+**Updating the system for all machines while each keeps its own data** (`rebase`). Make the new version as a clean root (boot one machine from its own copy, update it, power it off, `save` it under a new name), then move every machine root to it:
+
+```sh
+docker exec <container> nfs-root rebase debian-2026-12 web1 web2 web3
+```
+
+For each machine, `rebase` copies the paths of its keep list aside, makes the root again from the new clean root (a new identity, as with `create`), and puts the kept paths back over it, each as a whole. Everything else comes from the new clean root: programs or settings that were changed on one machine only and are not on its keep list are gone. The default keep list is the machine's data and identity:
+
+```
+/home
+/root
+/var/log
+/etc/hostname
+/etc/hosts
+/etc/machine-id
+/etc/ssh/ssh_host_*
+```
+
+A machine root can have its own list in `/etc/nfs-root.keep`, which replaces the default: one absolute path per line, `*` allowed, `#` starts a comment (for example add `/var/lib/postgresql` or `/etc/myapp`). Keep the identity lines in it, or the machine gets a new machine ID and new SSH host keys. Do not keep a package manager's database (`/var/lib/dpkg`, `/var/lib/apt`, `/lib/apk`) or anything else that describes the installed system: it would no longer match the new one. Accounts are part of the system: create users in the clean root, so that their IDs match the kept `/home`. The kept paths are copied aside to `/srv/nfs/.rebase/<name>` first and that copy is removed when the new root is ready; if a rebase stops halfway, the copy stays there and a new rebase of that machine refuses to start until it is removed. The idea is the same as Fedora's `readonly-root` state list or NixOS's impermanence: name what is kept, and let everything else come from the system; here it is applied on the server when the system changes, so the machines need nothing installed for it.
 
 The entrypoint also uses `nfs-root mount-layers` (mount every layered root and write its exports); it is not meant to be run by hand.
 

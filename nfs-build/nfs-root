@@ -15,6 +15,13 @@
 #                          (fails if it exists): boot a machine from its own
 #                          copy, install and set up what you want, power it
 #                          off, save
+#   rebase <clean> <name>...
+#                          move machine roots to the clean root /ro/<clean>
+#                          (a new version of the system) and keep each
+#                          machine's data and identity: the paths in its
+#                          /etc/nfs-root.keep, or by default /home, /root,
+#                          /var/log, hostname, hosts, machine ID, SSH host
+#                          keys. Copies stay copies, layered roots layered
 #
 # A copy gets its own identity: /etc/hostname = <name> (if the clean root has
 # /etc), an empty /etc/machine-id (systemd makes a new one at the first
@@ -173,6 +180,79 @@ delete_root() {
   fi
 }
 
+# What a machine keeps when its root moves to a new clean root: its data and
+# its identity. Everything else (programs, system settings) comes from the
+# new clean root. A machine root can name its own list in /etc/nfs-root.keep
+# (one absolute path per line, * allowed, # starts a comment); the list is
+# read from the machine root being moved.
+DEFAULT_KEEP='/etc/hostname
+/etc/hosts
+/etc/machine-id
+/etc/ssh/ssh_host_*
+/home
+/root
+/var/log'
+
+keep_list() {
+  if [ -f "$1/etc/nfs-root.keep" ]; then
+    sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^$/d' "$1/etc/nfs-root.keep"
+  else
+    printf '%s\n' "$DEFAULT_KEEP"
+  fi
+}
+
+# Move machine roots to another clean root and keep what the keep list names.
+# The kept paths are copied aside to $DATA/.rebase/<name> first; that copy is
+# left in place if anything fails, and removed when the new root is ready.
+rebase_root() {
+  clean=$1 name=$2
+  check_name "$name"
+  src=$DATA/rw/$name
+  [ -d "$src" ] || die "no machine root $src"
+  if is_layered "$name"; then
+    [ "$(cat "$LAYERS/$name/base")" = "$clean" ] && die "/rw/$name is already layered on /ro/$clean"
+    mountpoint -q "$src" || die "/rw/$name is not mounted (its clean root is missing?)"
+  fi
+  stage=$DATA/.rebase/$name
+  [ -e "$stage" ] && die "$stage exists: a rebase of $name did not finish; copy back what you need from it, then delete it"
+  mkdir -p "$stage/files"
+  keep_list "$src" > "$stage/keep"
+  kept=0
+  while IFS= read -r p; do
+    case "$p" in /*) ;; *) echo "nfs-root: $name: skipping '$p' in the keep list (not an absolute path)" >&2; continue ;; esac
+    case "$p" in /|//*|*/./*|*/.|*/../*|*/..) echo "nfs-root: $name: skipping '$p' in the keep list (not a path below /)" >&2; continue ;; esac
+    # Expand * inside the machine root; an unmatched pattern stays as it is
+    for f in "$src"$p; do
+      [ -e "$f" ] || [ -L "$f" ] || continue
+      rel=${f#"$src"}
+      mkdir -p "$stage/files$(dirname "$rel")"
+      cp -a --reflink=auto "$f" "$stage/files$rel"
+      echo "$rel" >> "$stage/kept"
+      kept=$((kept + 1))
+    done
+  done < "$stage/keep"
+  if is_layered "$name"; then
+    delete_root "$name"
+    layer_root "$clean" "$name"
+  else
+    delete_root "$name"
+    copy_root "$clean" "$name"
+  fi
+  dst=$DATA/rw/$name
+  if [ -f "$stage/kept" ]; then
+    while IFS= read -r rel; do
+      # The kept version replaces the new root's version as a whole, so a
+      # file the machine deleted from a kept directory stays deleted
+      rm -rf "$dst$rel"
+      mkdir -p "$dst$(dirname "$rel")"
+      cp -a --reflink=auto "$stage/files$rel" "$dst$rel"
+    done < "$stage/kept"
+  fi
+  rm -rf "$stage"
+  rmdir "$DATA/.rebase" 2>/dev/null || true
+  echo "nfs-root: /rw/$name now on /ro/$clean, $kept kept path(s)"
+}
+
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case "$cmd" in
@@ -211,6 +291,12 @@ case "$cmd" in
       delete_root "$2"
       copy_root "$1" "$2"
     fi ;;
+  rebase)
+    [ $# -ge 2 ] || die "usage: nfs-root rebase <clean> <name>..."
+    clean=$1; shift
+    check_name "$clean"
+    [ -d "$DATA/ro/$clean" ] || die "no clean root $DATA/ro/$clean"
+    for name in "$@"; do rebase_root "$clean" "$name"; done ;;
   mount-layers)
     # For start.sh, before the server starts: mount every layered root and
     # write their exports.
@@ -248,5 +334,5 @@ case "$cmd" in
     fi
     delete_root "$1" ;;
   *)
-    sed -n '2,29s/^# \{0,1\}//p' "$0"; [ -z "$cmd" ] || exit 2 ;;
+    sed -n '2,36s/^# \{0,1\}//p' "$0"; [ -z "$cmd" ] || exit 2 ;;
 esac
