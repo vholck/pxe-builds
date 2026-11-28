@@ -13,7 +13,7 @@ The directory mounted at `/srv/smb` is served as `\\<server>\install`, read-only
 | `<name>\` | the contents of one installation ISO (Windows: `setup.exe`, `sources\install.wim`, ...) |
 | `unattend\` | answer files for Windows Setup (`autounattend.xml` and the like) |
 
-Clients log in with `SMB_USER` and `SMB_PASSWORD`. Windows does not connect to a share as a guest over SMB2/3 by default, and Windows 11 24H2 and Server 2025 require signing, which a guest session cannot do, so the share has an account. The password only satisfies Windows: the share is read-only, and whoever installs from it has to know the password anyway (for Windows PE it is in the script that runs `net use`).
+Clients log in with `SMB_USER` and `SMB_PASSWORD` (default `install` and `install`). Windows does not connect to a share as a guest over SMB2/3 by default, and Windows 11 24H2 and Server 2025 require signing, which a guest session cannot do, so the share has an account. The password only satisfies Windows: the share is read-only, and whoever installs from it has to know the password anyway (for Windows PE it is in the script that runs `net use`), so a default works out of the box. Set your own when the share holds answer files with passwords in them and not everyone on the network should read them.
 
 ## Running it
 
@@ -31,7 +31,7 @@ On `docker stop` it stops `smbd` and waits up to 5 seconds before it kills it. L
 | Variable | Default | Required | Meaning |
 |---|---|---|---|
 | `SMB_ENABLED` | `0` | yes, set `1` | `1` starts the server. Any other value only prepares the directories and sleeps. |
-| `SMB_PASSWORD` | none | yes, when enabled | Password of `SMB_USER`. Keep it out of files in git; it must not contain `%` (Windows' `net use` and cmd scripts treat it specially). |
+| `SMB_PASSWORD` | `install` | no | Password of `SMB_USER`. It must not contain `%` (Windows' `net use` and cmd scripts treat it specially). |
 | `SMB_USER` | `install` | no | Account the clients log in with. |
 | `SMB_CLIENTS` | `LAN_SUBNET` | no | Who may connect: addresses or networks (`a.b.c.d/n`), comma-separated (Samba's `hosts allow`). |
 | `LAN_SUBNET` | none | yes, unless `SMB_CLIENTS` is set | Your network in CIDR notation (e.g. `192.0.2.0/24`). |

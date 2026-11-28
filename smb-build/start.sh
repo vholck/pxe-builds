@@ -4,7 +4,8 @@
 #   /srv/smb/<name>/      contents of an installation ISO (Windows: setup.exe,
 #                         sources/install.wim, ...)
 #   /srv/smb/unattend/    answer files (autounattend.xml) for Windows Setup
-# Clients connect as \\<server>\install with SMB_USER and SMB_PASSWORD.
+# Clients connect as \\<server>\install with SMB_USER and SMB_PASSWORD
+# (default install/install).
 # Windows refuses guest access to SMB2/3 shares by default (and Windows 11
 # 24H2 and Server 2025 require signing, which a guest session cannot do), so
 # the share has a user and password, not guest access. The share is
@@ -32,7 +33,9 @@ fi
 
 clients=${SMB_CLIENTS:-${LAN_SUBNET:?set LAN_SUBNET (or SMB_CLIENTS): the network allowed to connect}}
 user=${SMB_USER:-install}
-: "${SMB_PASSWORD:?set SMB_PASSWORD: Windows does not connect to a share without a password}"
+# A default password: it guards nothing the boot server does not already hand
+# out (the install script that runs "net use" is served over HTTP).
+pass=${SMB_PASSWORD:-install}
 
 # hosts allow: a.b.c.d/n becomes a.b.c.d/netmask (the form smb.conf(5) documents)
 allow=""
@@ -98,7 +101,7 @@ cat > /etc/samba/smb.conf <<EOF
    acl allow execute always = yes
 EOF
 
-printf '%s\n%s\n' "$SMB_PASSWORD" "$SMB_PASSWORD" | smbpasswd -s -a "$user" >/dev/null
+printf '%s\n%s\n' "$pass" "$pass" | smbpasswd -s -a "$user" >/dev/null
 testparm -s --suppress-prompt >/dev/null
 
 printf '[smb] %s; share \\\\<this server>\\install = %s (read-only), user %s, for%s\n' "$(cat /samba.version)" "$DATA" "$user" "$allow"
