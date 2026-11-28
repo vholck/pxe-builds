@@ -151,6 +151,36 @@ It downloads Debian's generic cloud image (`debian-13-generic-amd64` from cloud.
 
 Then make a machine's disk from it, e.g. `docker exec <container> iscsi-disk copy debian debian-02-00-00-00-00-01`.
 
+## A Raspberry Pi 5 on an iSCSI disk: get-raspios-iscsi-disk.sh
+
+[get-raspios-iscsi-disk.sh](get-raspios-iscsi-disk.sh) prepares Raspberry Pi OS Lite (64-bit, trixie) as a base disk for a Raspberry Pi 5:
+
+```sh
+sh get-raspios-iscsi-disk.sh <data dir> <ssh public key file> [name]
+```
+
+It writes `<data dir>/iscsi/base/<name>.raw` (default `raspios`, `DISK_SIZE` default `8G`) and the boot files `<data dir>/matchbox/assets/raspios-iscsi/<name>/kernel_2712.img` and `initramfs_2712`. On an x86 host the package step runs under QEMU user emulation, which the script registers for its run (about 8 minutes).
+
+A Pi cannot `sanboot`: U-Boot has no ACPI, so iPXE cannot describe the disk in an iBFT ("Could not describe SAN devices"), and Raspberry Pi's kernel has no `iscsi_ibft`. So the Pi boots the kernel and initramfs over HTTP and names its disk on the kernel command line, where open-iscsi's initramfs script reads it:
+
+```
+iscsi_initiator=iqn.2026-11.pxe.stack:client-<mac> iscsi_target_ip=<server> iscsi_target_port=3260
+iscsi_target_name=iqn.2026-11.pxe.stack:raspios-<mac> root=PARTUUID=15c51005-02 rootwait
+ip=<address>:<server>:<gateway>:<netmask>:::off:<dns> BOOTIF=01-<mac> systemd.hostname=raspios-<mac>
+```
+
+In iPXE that is `${ip}`, `${next-server}`, `${gateway}`, `${netmask}`, `${dns}` and `${mac:hexhyp}`: the address iPXE got is handed on, and the initramfs runs no DHCP of its own. In the disk:
+
+- open-iscsi in the initramfs; iscsid takes the session over after the start.
+- A fixed partition table identifier (`DISK_ID`, default `0x15c51005`), so `root=PARTUUID=15c51005-02` finds the disk and never an SD card or USB stick flashed from the stock image.
+- systemd-networkd keeps the address and renews it with the MAC address as client ID; NetworkManager is left for Wi-Fi; `systemd-network-generator` is off (it would give every port the `ip=` address).
+- The kernel packages are held: the Pi runs the kernel served over HTTP, and an update inside the disk would leave it without matching modules. Update by making the base again.
+- SSH for root with your key; host keys made at the first boot (Raspberry Pi OS does not make missing ones by itself, so a drop-in runs `ssh-keygen -A` before `sshd -t`); empty machine ID; no first-boot dialog; swap in zram only.
+
+Then `docker exec <container> iscsi-disk copy raspios raspios-<mac>`.
+
+Tested 2026-11-28 on a Raspberry Pi 5 (8 GB) under U-Boot: login prompt on the serial console after about 15 s of Linux, SSH, root on `sdb2` with transport `iscsi`, the session taken over by iscsid, one address (the one iPXE got, renewed by networkd), `running` with no failed units; a file written before a restart was there after it. Not tested: Pi 3 and Pi 4 (`kernel8.img` and `initramfs8` instead), the display.
+
 ## iPXE examples
 
 Two iPXE scripts in [examples/](examples/). Both find the disk by the machine's MAC address (lower-case, with hyphens), so the same script works for every machine. They use `${next-server}` as the target's address and the default `ISCSI_IQN`; change both if yours differ. Run them from your iPXE boot flow, for example as the per-machine script `ipxe/hosts/<mac>.ipxe` that the boot script of [ipxe-build](../ipxe-build/README.md) chains.
