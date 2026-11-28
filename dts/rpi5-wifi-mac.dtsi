@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Wi-Fi MAC address for the upstream Linux device trees of the Raspberry
+ * Pi 5. The board's Wi-Fi MAC is in the SoC's OTP; the Pi firmware writes it
+ * into local-mac-address of the node that alias wifi0 points to, as it does
+ * in Raspberry Pi's own tree (bcm2712-rpi-5-b.dts). Upstream's tree has
+ * neither the alias nor the property (checked 2026-11-28 in Linux master),
+ * so brcmfmac fell back to the macaddr line of the nvram file, and every
+ * Pi 5 had the same Wi-Fi MAC, b8:27:eb:74:f2:6c.
+ *
+ * Included after the board tree by build-rpi-upstream.sh. See README.md.
+ *
+ * - The alias lets the Pi firmware fill the address when it loads this tree
+ *   itself (UEFI with UEFI_RPI5_DT=upstream), and lets iPXE copy it from the
+ *   firmware's tree into this one when this tree is loaded with `fdt`
+ *   (ipxe-build patch 0001).
+ * - The all-zero placeholder is what Raspberry Pi's tree carries. A loader
+ *   that fills nothing leaves it at zero, which brcmfmac ignores (not a
+ *   valid address), so the driver behaves as without the property.
+ */
+
+&wifi {
+	local-mac-address = [00 00 00 00 00 00];
+};
+
+/ {
+	aliases {
+		wifi0 = &wifi;
+	};
+};

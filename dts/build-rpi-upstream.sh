@@ -2,7 +2,8 @@
 # Builds the upstream Linux device trees of one Raspberry Pi family, with
 # symbols, from devicetree-rebasing (the Linux device tree files, fetched by
 # fetch-rpi-dts.sh at the release pinned in build.env). Pi 5 trees get the RP1's
-# UART0 added (rp1-uart0.dtsi); Pi 3 and Pi 4 trees are built as upstream ships
+# UART0 added (rp1-uart0.dtsi) and a slot for the Wi-Fi MAC
+# (rpi5-wifi-mac.dtsi); Pi 3 and Pi 4 trees are built as upstream ships
 # them (their console, the mini UART on GPIO 14/15, is already described).
 # Used by rpi-uboot-build and rpi-uefi-build, so both firmwares serve the same
 # trees. A loader picks one by the firmware's FdtFile variable. See README.md.
@@ -48,7 +49,7 @@ for board in $boards; do
   [ -f "$src/src/arm64/broadcom/$board.dts" ] || die "$board.dts not found in $src; upstream changed"
   # (named apart from the board file, which it would otherwise include itself)
   if [ "$family" = rpi5 ]; then
-    printf '#include "%s.dts"\n#include "%s/rp1-uart0.dtsi"\n' "$board" "$here" > "$tmp/$board-top.dts"
+    printf '#include "%s.dts"\n#include "%s/rp1-uart0.dtsi"\n#include "%s/rpi5-wifi-mac.dtsi"\n' "$board" "$here" "$here" > "$tmp/$board-top.dts"
   else
     printf '#include "%s.dts"\n' "$board" > "$tmp/$board-top.dts"
   fi
@@ -60,7 +61,8 @@ for board in $boards; do
   "$dtc" -q -I dtb -O dts -o "$tmp/$board.check" "$out/broadcom/$board.dtb"
   if [ "$family" = rpi5 ]; then
     # The firmware applies enable_uart=1 through these; check they came through.
-    wants="arm,sbsa-uart|__symbols__|__overrides__|uart0_console|stdout-path = \"serial0:115200n8\""
+    # wifi0 + local-mac-address: the firmware and iPXE fill the Wi-Fi MAC.
+    wants="arm,sbsa-uart|__symbols__|__overrides__|uart0_console|stdout-path = \"serial0:115200n8\"|wifi0 = |local-mac-address"
   else
     wants="__symbols__|stdout-path"
   fi
@@ -68,5 +70,5 @@ for board in $boards; do
   for want in "${want_list[@]}"; do
     grep -qF "$want" "$tmp/$board.check" || die "broadcom/$board.dtb has no '$want'"
   done
-  echo "[build-rpi-upstream] built broadcom/$board.dtb$([ "$family" = rpi5 ] && echo ' (upstream tree + RP1 UART0)')"
+  echo "[build-rpi-upstream] built broadcom/$board.dtb$([ "$family" = rpi5 ] && echo ' (upstream tree + RP1 UART0 + Wi-Fi MAC slot)')"
 done

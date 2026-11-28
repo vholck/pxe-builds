@@ -16,7 +16,7 @@ The trees are built from [devicetree-rebasing](https://git.kernel.org/pub/scm/li
 | --- | --- | --- |
 | `rpi3` | `bcm2837-rpi-3-b`, `bcm2837-rpi-3-b-plus`, `bcm2837-rpi-3-a-plus`, `bcm2837-rpi-zero-2-w` | nothing: the console UART is in upstream's tree |
 | `rpi4` | `bcm2711-rpi-4-b`, `bcm2711-rpi-400` | nothing: the console UART is in upstream's tree |
-| `rpi5` | `bcm2712-rpi-5-b`, `bcm2712-d-rpi-5-b` | `rp1-uart0.dtsi` |
+| `rpi5` | `bcm2712-rpi-5-b`, `bcm2712-d-rpi-5-b` | `rp1-uart0.dtsi`, `rpi5-wifi-mac.dtsi` |
 
 rpi-uboot-build builds every family and serves them as `rpi/upstream/broadcom/<board>.dtb`; boot scripts load the one an OS needs through the firmware's `FdtFile` variable (`fdt tftp://${next-server}/rpi/upstream/${efi/FdtFile:string}`, [rule R3](../README.md#design-rules)). rpi-uefi-build builds the Pi 5 trees as its board trees (`UEFI_RPI5_DT=upstream`). The Compute Modules are left out: U-Boot's `fdtfile` names (`bcm2837-rpi-cm3.dtb`, `bcm2711-rpi-cm4.dtb`) are not upstream's (`-cm3-io3`, `-cm4-io`), so a CM keeps the firmware's tree.
 
@@ -40,6 +40,18 @@ Who enables the node and decides the console:
 | iPXE `fdt` from `rpi/upstream/` by the `FdtFile` variable, under either firmware | node enabled in the tree; under U-Boot also `0021` through the EFI Device Tree Fixup Protocol | iPXE drops `stdout-path` when the firmware's tree has none ([ipxe-build](../ipxe-build/patches/) patch `0001`); under U-Boot also `0007` |
 
 Without a display, Linux's console is the GPIO UART: kernel messages from the start and a login prompt on the serial cable.
+
+## `rpi5-wifi-mac.dtsi`: the Wi-Fi MAC
+
+A Pi 5's Wi-Fi MAC is in the SoC's OTP. The Pi firmware writes it into `local-mac-address` of the node alias `wifi0` names, as it does for Ethernet through `ethernet0`. Raspberry Pi's tree has both; upstream's has neither, so brcmfmac took the `macaddr` line of the nvram file and every Pi 5 had the Wi-Fi MAC `b8:27:eb:74:f2:6c`. The file adds alias `wifi0` and an all-zero `local-mac-address` on the Wi-Fi node:
+
+- when the Pi firmware loads the tree itself (UEFI with `UEFI_RPI5_DT=upstream`), it fills in the address;
+- when iPXE loads the tree with `fdt`, it copies the address from the firmware's tree ([ipxe-build](../ipxe-build/patches/) patch `0001`);
+- a loader that fills nothing leaves zeros, which brcmfmac ignores: the same as without the property.
+
+With the alias, systemd names the Wi-Fi interface after it, `wld0` instead of `wlan0`, as `ethernet0` gives `end0`; a configuration that names `wlan0` must be changed (or match the interface by MAC address).
+
+The Pi 3B+ and Pi 4 need nothing: their Wi-Fi modules carry their own MAC, which brcmfmac prefers over the nvram file.
 
 ## When upstream adds the node
 

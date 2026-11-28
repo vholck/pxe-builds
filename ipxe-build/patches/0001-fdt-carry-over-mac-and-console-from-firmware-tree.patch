@@ -1,8 +1,8 @@
 diff --git a/src/core/fdt.c b/src/core/fdt.c
-index 8ac781b..bb1f95f 100644
+index 8ac781b05..b611e98b3 100644
 --- a/src/core/fdt.c
 +++ b/src/core/fdt.c
-@@ -1396,6 +1396,60 @@ static int fdt_bootargs ( struct fdt *fdt, const char *cmdline,
+@@ -1396,6 +1396,67 @@ static int fdt_bootargs ( struct fdt *fdt, const char *cmdline,
  	return 0;
  }
  
@@ -13,35 +13,42 @@ index 8ac781b..bb1f95f 100644
 + * @ret rc		Return status code
 + *
 + * A device tree loaded from an image knows nothing about the board it
-+ * runs on.  Copy what only the firmware can know: the MAC address of
-+ * the first Ethernet device (without it, a driver may pick a random
-+ * one), and the firmware's console choice (no "stdout-path" in the
++ * runs on.  Copy what only the firmware can know: the MAC addresses of
++ * the first Ethernet and Wi-Fi devices (without them, a driver may pick
++ * a random or a default one), and the firmware's console choice (no "stdout-path" in the
 + * system tree means the firmware chose not to name a serial console).
 + */
 +static int fdt_inherit ( struct fdt *fdt ) {
 +	static const uint8_t zero_mac[6];
++	static const char *mac_aliases[] = { "ethernet0", "wifi0" };
 +	struct fdt_descriptor desc;
 +	struct fdt_descriptor old;
 +	unsigned int sysoffset;
 +	unsigned int offset;
++	unsigned int i;
 +	int rc;
 +
 +	/* Do nothing if there is no system device tree */
 +	if ( ! sysfdt.len )
 +		return 0;
 +
-+	/* Copy MAC address of the first Ethernet device */
-+	if ( ( fdt_alias ( &sysfdt, "ethernet0", &sysoffset ) == 0 ) &&
-+	     ( fdt_property ( &sysfdt, sysoffset, "local-mac-address",
-+			      &desc ) == 0 ) &&
-+	     ( desc.len == sizeof ( zero_mac ) ) &&
-+	     ( memcmp ( desc.data, zero_mac, sizeof ( zero_mac ) ) != 0 ) &&
-+	     ( fdt_alias ( fdt, "ethernet0", &offset ) == 0 ) ) {
-+		DBGC ( fdt, "FDT copying local-mac-address from system "
-+		       "tree\n" );
-+		if ( ( rc = fdt_set ( fdt, offset, "local-mac-address",
-+				      desc.data, desc.len ) ) != 0 )
-+			return rc;
++	/* Copy MAC addresses of the first Ethernet and Wi-Fi devices */
++	for ( i = 0 ; i < ( sizeof ( mac_aliases ) /
++			    sizeof ( mac_aliases[0] ) ) ; i++ ) {
++		if ( ( fdt_alias ( &sysfdt, mac_aliases[i],
++				   &sysoffset ) == 0 ) &&
++		     ( fdt_property ( &sysfdt, sysoffset, "local-mac-address",
++				      &desc ) == 0 ) &&
++		     ( desc.len == sizeof ( zero_mac ) ) &&
++		     ( memcmp ( desc.data, zero_mac,
++				sizeof ( zero_mac ) ) != 0 ) &&
++		     ( fdt_alias ( fdt, mac_aliases[i], &offset ) == 0 ) ) {
++			DBGC ( fdt, "FDT copying %s local-mac-address from "
++			       "system tree\n", mac_aliases[i] );
++			if ( ( rc = fdt_set ( fdt, offset, "local-mac-address",
++					      desc.data, desc.len ) ) != 0 )
++				return rc;
++		}
 +	}
 +
 +	/* Remove "stdout-path" if the firmware removed it */
@@ -63,7 +70,7 @@ index 8ac781b..bb1f95f 100644
  /**
   * Create device tree
   *
-@@ -1436,6 +1490,10 @@ int fdt_create ( struct fdt_header **hdr, const char *cmdline,
+@@ -1436,6 +1497,10 @@ int fdt_create ( struct fdt_header **hdr, const char *cmdline,
  	fdt.raw = copy;
  	fdt.realloc = fdt_urealloc;
  
@@ -74,7 +81,7 @@ index 8ac781b..bb1f95f 100644
  	/* Populate boot arguments */
  	if ( ( rc = fdt_bootargs ( &fdt, cmdline, initrd, initrd_len ) ) != 0 )
  		goto err_bootargs;
-@@ -1445,6 +1503,7 @@ int fdt_create ( struct fdt_header **hdr, const char *cmdline,
+@@ -1445,6 +1510,7 @@ int fdt_create ( struct fdt_header **hdr, const char *cmdline,
  	return 0;
  
   err_bootargs:

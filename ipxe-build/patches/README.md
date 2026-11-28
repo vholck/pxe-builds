@@ -12,7 +12,7 @@ A device tree loaded with iPXE's `fdt` command (for example the upstream Linux t
 
 The patch copies two things from the firmware's own tree (the system tree iPXE was started with) into the loaded one, when the loaded tree has the same node:
 
-- `local-mac-address` of alias `ethernet0`, unless the firmware's value is missing or all zeros;
+- `local-mac-address` of aliases `ethernet0` and `wifi0`, unless the firmware's value is missing or all zeros (on a Pi 5 the firmware has the board's Wi-Fi MAC; without it Linux used the nvram file's address, the same on every Pi 5);
 - the absence of `/chosen/stdout-path`: when the firmware removed it (because a display is the main console, `CONSOLE_MAIN=auto`), it is removed from the loaded tree too, so the firmware's console choice holds for every tree.
 
 Nothing changes when no `fdt` image is loaded: iPXE then passes the firmware's tree, as before.
