@@ -6,7 +6,7 @@ Ready-made network boot files for x86 PCs and Raspberry Pi 3, 4 and 5, built fro
 - **U-Boot** and **EDK2 UEFI firmware** for the Raspberry Pi 3, 4 and 5 that boot over the network out of the box, including the Pi 5's Ethernet, which upstream U-Boot and the Pi 5 UEFI port do not drive.
 - **Upstream Linux device trees** for the Pis, with the GPIO serial port upstream lacks on the Pi 5.
 - **Fedora CoreOS** network boot scripts, including the extra initrd a Pi 5 needs to find its network.
-- **NFS** (nfs-ganesha) and **iSCSI** (tgt) servers in user space, for diskless machines and network disks.
+- **NFS** (nfs-ganesha) and **iSCSI** (tgt) servers in user space, for diskless machines and network disks, and an **SMB** server (Samba) for installation media.
 
 Every image is built in GitHub Actions from this repository. Nothing has to be compiled on the machine that serves the files: a TFTP server (dnsmasq, for example) only needs the files copied into its root, and the "stage" images do exactly that when they start.
 
@@ -22,6 +22,7 @@ All images are public: `ghcr.io/vholck/pxe-builds/<name>`, tagged with the commi
 | `coreos` | [coreos-build/](coreos-build/) | Copies the Fedora CoreOS boot scripts and the Pi 5 extra initrds for the last six stable releases; rebuilt daily |
 | `nfs` | [nfs-build/](nfs-build/) | Runs nfs-ganesha for root file systems on NFS, with a helper for per-machine copies |
 | `iscsi` | [iscsi-build/](iscsi-build/) | Runs tgt with one target per disk image, with a helper to make, copy and reset disks |
+| `smb` | [smb-build/](smb-build/) | Runs Samba with one read-only share for installation media, for Windows Setup started from Windows PE over the network |
 
 A stage image deletes only the files listed in its own manifest (`build-info/<image>/published-files`), so files you add to the TFTP root stay: a script `ipxe/hosts/<mac>.ipxe` for one machine, Ignition configs in `coreos/ignition/`, a hand-made `<serial>/` directory for one Pi. `build-info/` also records exactly what was built: source commits, patches, settings.
 

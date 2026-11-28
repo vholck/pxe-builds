@@ -2,8 +2,10 @@
 # Boot this machine from its own network disk on the iscsi image's server,
 # and install the OS onto the disk first if it is empty. For
 # systems that install themselves with their own installer from a live
-# system: Fedora CoreOS (disk fcos-<mac>). Not Flatcar: its installed system
-# cannot start from an iSCSI disk.
+# system: Fedora CoreOS (disk fcos-<mac>), and Windows (set os win, disk
+# win-<mac>: Windows Setup started from Windows PE reads its files from an
+# SMB share, see smb-build/README.md; sanhook makes the disk Windows' disk 0).
+# Not Flatcar: its installed system cannot start from an iSCSI disk.
 #
 # Where it goes: the TFTP root, as the host script of each machine (MAC
 # lower-case, with hyphens), e.g.

@@ -54,6 +54,7 @@ What is per individual board is decided at run time, not at build time:
 | [Raspberry Pi firmware](https://github.com/raspberrypi/firmware) (`start*.elf`, device trees) | commit `d131b57` | `FIRMWARE_VERSION` (U-Boot), `START_ELF_VERSION`, `DTB_VERSION`, `DTBO_VERSION` (UEFI), all in [build.env](build.env) |
 | [nfs-ganesha](https://github.com/nfs-ganesha/nfs-ganesha) (image built here) | not pinned: Debian's `trixie-backports` package when the image is built (9.14-1~bpo13+1 on 2026-11-24; trixie itself has 6.5, see "nfs-ganesha (nfs service)"); the image prints its version at start | [nfs-build/Dockerfile](nfs-build/Dockerfile) |
 | [tgt](https://github.com/fujita/tgt) (image built here) | not pinned: Debian trixie's package when the image is built (1.0.85-1.3 on 2026-11-24); the image prints its version at start | [iscsi-build/Dockerfile](iscsi-build/Dockerfile) |
+| [Samba](https://www.samba.org/) (image built here) | not pinned: Debian trixie's package when the image is built (4.22.11 on 2026-11-28); the image prints its version at start | [smb-build/Dockerfile](smb-build/Dockerfile) |
 | [Debian cloud image](https://cloud.debian.org/images/cloud/) (`debian-13-generic-amd64`, base of the iSCSI example disk) | not pinned: `trixie/latest` when [get-debian-iscsi-disk.sh](iscsi-build/get-debian-iscsi-disk.sh) runs, checked against the `SHA512SUMS` next to it (Debian publishes no signature for it) | [iscsi-build/get-debian-iscsi-disk.sh](iscsi-build/get-debian-iscsi-disk.sh) |
 | [netboot.xyz](https://netboot.xyz) | not pinned: the menu is loaded from `boot.netboot.xyz` at boot | [netbootxyz.ipxe](ipxe-build/tftp/ipxe/netbootxyz.ipxe) |
 
@@ -205,6 +206,10 @@ No patches; Debian's package, no `targets.conf`: [iscsi-disk](iscsi-build/iscsi-
 | SCSI serial number and device ID from the disk's name (`scsi_sn`, `scsi_id`) | tgt derives them from the target id, which changes when disks come and go; an OS that identifies disks by serial (Windows, `/dev/disk/by-id`) would see another disk after a restart | `tgtadm --params` |
 | Thin provisioning on (`thin_provisioning=1`) | The disk files are sparse: blocks the machine discards (TRIM, `fstrim`) become holes in the file again instead of staying used on the host (tested 2026-11-24: discarding 512 MB of a copied Debian disk freed 312 MB of the file) | `tgtadm --params` |
 | Pings every 15 s, connection closed after 4 unanswered (`nop_interval=15`, `nop_count=4`; tgt: off) | Without them a machine that was switched off, and the session iPXE leaves behind when the OS takes over, stay connected for over half an hour (TCP keepalive), and `iscsi-disk delete`/`reset` refuse. Tested 2026-11-24 with a frozen initiator: closed 71 s after it stopped answering. iPXE does not answer pings (`iscsi_rx_nop_in` ignores them); its session closes after a minute and iPXE opens a new one if it still needs the disk (`sandev_reopen` in `sanboot.c`; read in the source, not yet seen in a boot) | `tgtadm --op update --mode target` |
+
+## Samba (smb service)
+
+No patches; Debian's package, `smbd` only. `smb.conf` is written by [start.sh](smb-build/start.sh) at every start; the settings that differ from Samba's defaults, and why, are listed in [smb-build/README.md](smb-build/README.md#settings-that-differ-from-sambas-defaults). The one that is not about locking things down: `acl allow execute always = yes`, because files unpacked from an ISO have no execute bits and Windows refuses to run `setup.exe` from the share without it (seen 2026-11-28).
 
 ## netboot.xyz
 
